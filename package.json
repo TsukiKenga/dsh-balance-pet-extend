@@ -1,0 +1,42 @@
+{
+  "name": "dsh-balance-pet-extend",
+  "version": "1.5.0",
+  "description": "DSH 余额桌宠：把 macOS 原生桌宠（大肥鱼 / GPT龙娘 / 大小姐Claude / 北美猫娘Gemini）改写为 DSH Web 插件。余额显示在角色手持的平板里，来源覆盖所有「用 API key 就能自动查到」的厂商（金额 + 订阅额度，只列已配凭据的）；每轮结束弹「喜报」显示本轮消耗；累计计费可结算为「喜报」全屏证书；节假日清单可导入并自动提示过期；右键菜单含「网络自检」与「关于」。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "balance",
+    "desktop-pet",
+    "pet"
+  ],
+  "author": "TsukiKenga (https://github.com/TsukiKenga)",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "licenses"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TsukiKenga/dsh-balance-pet-extend.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TsukiKenga/dsh-balance-pet-extend/issues"
+  },
+  "homepage": "https://github.com/TsukiKenga/dsh-balance-pet-extend#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

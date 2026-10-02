@@ -1,0 +1,21 @@
+# ============================================================================
+# dsh-balance-pet-extend —— DSH bundle patch
+# ============================================================================
+# 插件的“挂载声明”。DSH 启动时按 bundle 层栈叠加各插件 patch，本文件把余额桌宠
+# 插入 profile 的配置树。
+#
+# ⚠️ 下面的 `name` 是**要被 import 的包名**，必须与 package.json 的 "name" 完全一致。
+#    两者不一致时的现象是：启动日志出现
+#      dsh: warning: 1 entry did not activate
+#      <name> (<name>): failed to import
+#    而插件完全不工作（其它地方看不出问题）。改名时记得同步这里。
+#
+# 安装：
+#   dsh plugin --profile <profile> add link:<本目录绝对路径>
+# 从 GitHub 安装：
+#   dsh plugin --profile <profile> add github:TsukiKenga/dsh-balance-pet-extend
+# ============================================================================
+
+- insert:
+    - id: dsh-balance-pet-extend
+      name: dsh-balance-pet-extend
