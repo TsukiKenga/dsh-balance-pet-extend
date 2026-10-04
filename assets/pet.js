@@ -63,7 +63,10 @@ var C_REPORT = '#e0161a'         // 喜报红
 // Certificate.png 中部黄色区域（1671×941 上实测标定：避开顶部「喜 报」横幅与左右红幕布）
 var CERT_W = 1671, CERT_H = 941
 var CERT_BOX = { x: 352, y: 205, w: 978, h: 567 }
-var C_CERT_INK = '#9c1608'       // 结算正文墨色（暗红，贴近「喜 报」用色）
+// 正文整体下移的比例（相对整张证书高度）——「往下挪一点」，同时把高度减掉同样多，
+// 这样内容底部仍与黄区底边对齐，不会溢出。
+var CERT_BODY_DROP = 0.022
+var C_CERT_INK = '#000'          // 结算正文墨色（黑）
 
 var STORE_KEY = 'dshBalancePet.state.v1'
 
@@ -1383,7 +1386,7 @@ function showAbout() {
 
   var title = document.createElement('div')
   title.className = 'dshpet-about-title'
-  title.textContent = '关于'
+  title.textContent = '关于 ' + (info.name || 'DSH Balance Pet Enhanced')
   box.appendChild(title)
 
   // 一行「键：值」，值可以是字符串，也可以是若干节点（用来放链接）
@@ -1413,16 +1416,19 @@ function showAbout() {
     return v
   }
 
-  kv('名称', info.name || 'dsh-balance-pet-extend')
+  kv('名称', info.name || 'DSH Balance Pet Enhanced')
   kv('版本', info.version || '—')
   kv('构建时间', info.buildTime ? fmtTime(Date.parse(info.buildTime)) : '—')
+  // 包名 = dsh plugin add 时用的名字（与上面的产品名是两件事）
   if (info.pkgName) kv('包名', info.pkgName)
+  // 本分支的仓库地址（可点）
+  if (info.repo && info.repo.url) kv(info.repo.label || 'GitHub', [aboutLink(info.repo.url)])
 
   var au = info.author || {}
-  kv('作者', [au.name || '—', '　', au.url ? aboutLink(au.url) : ''])
+  kv(au.role || '作者', [au.name || '—', '　', au.url ? aboutLink(au.url) : ''])
   // 许可证原文随包分发，这里给的是**可点开直接阅读**的入口（应用内显示，不依赖浏览器）
   if (info.selfLicense) kv('许可', [(info.selfLicense.label || 'MIT') + '　', licenseAnchor('LICENSE.txt', 'MIT 许可证原文')])
-  if (info.notices) kv('第三方声明', [licenseAnchor('THIRD-PARTY-NOTICES.md', '第三方来源与许可')])
+  if (info.notices) kv('第三方声明', [licenseAnchor('THIRD-PARTY-NOTICES.txt', '第三方来源与许可')])
 
   var refs = info.references || []
   if (refs.length) {
@@ -1452,7 +1458,7 @@ function showAbout() {
           var lab2 = document.createElement('span')
           lab2.textContent = '　素材来源说明：'
           lic.appendChild(lab2)
-          lic.appendChild(licenseAnchor('whale-PROVENANCE.md', '点此阅读'))
+          lic.appendChild(licenseAnchor('whale-PROVENANCE.txt', '点此阅读'))
         }
         box.appendChild(lic)
       } else if (ref.licenseLabel) {
@@ -1661,10 +1667,12 @@ function layoutSettlement() {
   o.box.style.height = h + 'px'
   var bx = CERT_BOX.x / CERT_W * w, by = CERT_BOX.y / CERT_H * h
   var bw = CERT_BOX.w / CERT_W * w, bh = CERT_BOX.h / CERT_H * h
+  // 正文往下挪一点；高度同步减掉，底部仍与黄区对齐
+  var drop = h * CERT_BODY_DROP
   o.body.style.left = bx + 'px'
-  o.body.style.top = by + 'px'
+  o.body.style.top = (by + drop) + 'px'
   o.body.style.width = bw + 'px'
-  o.body.style.height = bh + 'px'
+  o.body.style.height = (bh - drop) + 'px'
   var base = Math.max(8, bw / 34)
   // 标题与正文用**同一套缩放**：标题只比正文大一档，且允许换行。
   // 之前是「把标题逐档缩到一行放得下」—— 标题串长（带完整起止时间）时会被压得极小，
@@ -1791,13 +1799,15 @@ function injectCss() {
     '.dshpet-cert{position:relative;background-image:url(' + PREFIX + '/certificate.png);' +
       'background-size:100% 100%;background-repeat:no-repeat;border-radius:6px;' +
       'box-shadow:0 14px 50px rgba(0,0,0,.55)}' +
-    '.dshpet-cert-body{position:absolute;overflow:hidden;color:#9c1608;font-weight:800;' +
+    '.dshpet-cert-body{position:absolute;overflow:hidden;color:#000;font-weight:900;' +
       'font-family:system-ui,"Segoe UI",sans-serif;line-height:1.3}' +
-    '.dshpet-cert-title{font-weight:900;white-space:normal;line-height:1.28;margin-bottom:.45em}' +
-    '.dshpet-cert-row{display:flex;justify-content:space-between;gap:1.4em;font-weight:700;line-height:1.42}' +
+    // 首行缩进两格（中文排版习惯）；标题就是正文第一行
+    '.dshpet-cert-title{font-weight:900;white-space:normal;line-height:1.28;margin-bottom:.45em;' +
+      'text-indent:2em}' +
+    '.dshpet-cert-row{display:flex;justify-content:space-between;gap:1.4em;font-weight:800;line-height:1.42}' +
     '.dshpet-cert-total{display:flex;justify-content:space-between;gap:1.4em;font-weight:900;' +
-      'border-top:2px solid rgba(156,22,8,.65);margin-top:.3em;padding-top:.3em}' +
-    '.dshpet-cert-sign{position:absolute;text-align:right;color:#9c1608;font-weight:800;' +
+      'border-top:2px solid rgba(0,0,0,.6);margin-top:.3em;padding-top:.3em}' +
+    '.dshpet-cert-sign{position:absolute;text-align:right;color:#000;font-weight:800;' +
       'font-family:system-ui,"Segoe UI",sans-serif;line-height:1.35;white-space:pre-line}' +
     '.dshpet-cert-x{position:absolute;top:10px;right:10px;width:36px;height:36px;border:none;' +
       'border-radius:50%;background:rgba(0,0,0,.42);color:#fff;font-size:24px;line-height:1;' +
@@ -1840,7 +1850,7 @@ function injectCss() {
       'font-family:system-ui,"Segoe UI",sans-serif;font-size:13px}' +
     '.dshpet-about-title{font-size:16px;font-weight:800;margin-bottom:10px}' +
     '.dshpet-about-row{display:flex;gap:10px;padding:4px 0;align-items:baseline}' +
-    '.dshpet-about-k{flex:0 0 62px;color:#6b7ba8;font-weight:600}' +
+    '.dshpet-about-k{flex:0 0 96px;color:#6b7ba8;font-weight:600}' +
     '.dshpet-about-v{flex:1;word-break:break-all;font-weight:600}' +
     '.dshpet-about-link{color:#1d4ed8;text-decoration:none;font-weight:600}' +
     '.dshpet-about-link:hover{text-decoration:underline}' +

@@ -1,4 +1,6 @@
-# dsh-balance-pet-extend · DSH 余额桌宠
+# DSH Balance Pet Enhanced · DSH 余额桌宠
+
+> 正式名称 **DSH Balance Pet Enhanced**；安装 / 发布的包名是 **`dsh-balance-pet-extend`**（两者不同，别混）。
 
 把 macOS 原生桌宠 **DSH大肥鱼桌宠**（VK-1 的 macOS 移植版，Swift + AppKit）
 改写成的 **DSH Web 插件**。四个角色，余额显示在角色手持的倾斜平板里，每扣 ¥0.01
@@ -332,12 +334,16 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
 
 右键菜单**最底部** →「**关于…**」：
 
-- **名称**：`dsh-balance-pet-extend`
+- **名称**：`DSH Balance Pet Enhanced`
 - **版本**：取自 `package.json`
 - **构建时间**：参与运行的文件里最新的 mtime
   （本插件是 `link:` 安装、源码改动立刻生效，写死的时间会与实际运行的代码对不上，所以用 mtime）
-- **作者**：[TsukiKenga](https://github.com/TsukiKenga)
-- **许可**：`MIT` + [第三方来源与许可](THIRD-PARTY-NOTICES.md) —— 都是**可直接点开阅读的链接**
+- **包名**：`dsh-balance-pet-extend` —— 安装与发布用的就是这个
+- **GitHub**：[github.com/TsukiKenga/dsh-balance-pet-extend](https://github.com/TsukiKenga/dsh-balance-pet-extend)
+  （在对话框里是可点的链接）
+- **分支维护者**：[TsukiKenga](https://github.com/TsukiKenga)
+  （本仓库是上游桌宠的分支延续，所以署名口径是「分支维护者」而非原作者）
+- **许可**：`MIT` + [第三方来源与许可](THIRD-PARTY-NOTICES.txt) —— 都是**可直接点开阅读的链接**
 - **参考的开源项目**（GitHub 地址在对话框里可点）：
   - [VK-1](https://github.com/VKmich16/VK-1)　By VKmich —— 本桌宠立绘与动画的原型
     （许可证：**上游暂未附许可证**，对话框里如实写出）
@@ -351,12 +357,16 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
 | 文件 | 内容 |
 | --- | --- |
 | `LICENSE` | 本插件的 MIT 许可（TsukiKenga） |
-| `THIRD-PARTY-NOTICES.md` | 逐项第三方来源与权利状态 |
+| `THIRD-PARTY-NOTICES.txt` | 逐项第三方来源与权利状态 |
 | `licenses/DeepSeek-Balance-Whale-Widget-LICENSE.txt` | whale 的 MIT 原文（**逐字节复制**，SHA-256 已核对） |
-| `licenses/DeepSeek-Balance-Whale-Widget-PROVENANCE.md` | whale 的素材来源说明原样复制 |
+| `licenses/DeepSeek-Balance-Whale-Widget-PROVENANCE.md` | whale 的素材来源说明原样复制（上游文件，未改动） |
 
 宿主通过 `/dsh-pet/license.txt?f=<白名单文件名>` 提供，**白名单 + `path.basename`**，
-路径穿越请求返回 404（有测试盯着）。这四份都写进了 `package.json` 的 `files`，发布时会一起打包。
+路径穿越请求返回 404。这四份都写进了 `package.json` 的 `files`，发布时会一起打包。
+
+> **这几份都是纯文本，故意不写 Markdown。** 它们在 DSH 里是以等宽字体在 `<pre>` 中
+> 直接显示的，写 Markdown 只会把 `#`、`|`、`**` 原样露出来，反而更难读。
+> 唯一例外是 `licenses/…PROVENANCE.md` —— 那是上游的原始文件，逐字节保留、不做改动。
 
 #### 为什么不是 `<a target="_blank">`（曾经点不开的原因）
 
@@ -367,7 +377,7 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
 改法：**许可证改成应用内阅读** —— 点一下用 `fetch` 取回文本，直接在弹层里用 `<pre>` 显示，
 完全不依赖浏览器打开。（`https` 外链不受影响，所以三个 GitHub 链接仍是普通 `<a target="_blank">`。）
 
-> ⚠️ **发布前必读**：`THIRD-PARTY-NOTICES.md` 里逐项列了能不能随包公开发布。
+> ⚠️ **发布前必读**：`THIRD-PARTY-NOTICES.txt` 里逐项列了能不能随包公开发布。
 > 简单说：本插件代码（MIT）✅；VK-1 立绘**上游无许可** ⚠️；
 > `congrats-settle.mp3` 是**有版权的电影配乐，不可再分发** ❌（建议打包时排除）。
 
@@ -411,3 +421,7 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
 > 代码按 MIT；`assets/` 下的美术与音频素材**不在 MIT 覆盖范围内**，按 as-is 随插件分发，
 > 仅用于本地运行本插件，不授予再许可。其中 `congrats-settle.mp3` 是**有版权的电影配乐**，
 > 请勿随本插件再分发。
+
+---
+
+*本项目中的全部代码与文件由Deepseek V4.1 Flash生成，包括这个文件*
