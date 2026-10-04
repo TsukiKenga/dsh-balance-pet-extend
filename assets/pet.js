@@ -29,6 +29,48 @@ var SNAP_DURATION = 0.16     // 吸附动画（原版 easeOut 0.16s）
 var ANCHOR_MARGIN = 14       // 距屏幕边缘 14pt
 
 var SIZE_PRESETS = [110, 150, 210, 280]
+// 尺寸命名沿用上游 VK-1 v2 的「杯」体系（上游是 中杯/大杯/超大杯 三档，
+// 本插件多留了一档小号，所以补一个「小杯」，命名风格保持一致）。
+var SIZE_NAMES = ['小杯', '中杯', '大杯', '超大杯']
+// 厘米换算：浏览器**拿不到显示器的物理 DPI**，只能按 CSS 的标称 96 DPI 估算。
+// 上游是 WinForms，可以用 Graphics.DpiY 拿真实 DPI 把像素反算成厘米；
+// 这里给的是估算值，所以菜单里一律写成「≈ N cm」而不是精确值。
+var CSS_DPI = 96
+function pxToCm(px) { return Math.round(px / CSS_DPI * 2.54 * 10) / 10 }
+// 音量档位（沿用上游 VolumeSteps）。0% 即静音 —— 与上游一致：
+// 「0 % IS mute」，所以音量归零时开关也必须跟着变。
+var VOLUME_STEPS = [0, 25, 50, 75, 100]
+// 菜单调色板，两套值直接取自上游 PetColors（浅色是 DSH 菜单壳色，深色是 DSH 界面风）
+var MENU_THEMES = {
+  light: { bg: '#f8f9fa', ink: '#0f1115', head: '#81858c', hover: '#e9ecf2', border: '#e9ecf2', sep: '#ebeef2', accent: '#4176e6' },
+  dark: { bg: '#2c2c2e', ink: '#f9fafb', head: '#adb2b8', hover: '#3a3d42', border: '#42444a', sep: '#36373a', accent: '#7aaaff' },
+}
+function menuTheme() { return MENU_THEMES[state.theme === 'dark' ? 'dark' : 'light'] }
+
+// ============================================================================
+// 表情系统（来自上游 VK-1 v2）
+// ============================================================================
+// 上游只提供了**大肥鱼**这一只角色的四张表情立绘，所以表情只在这只角色上启用；
+// 其余角色保持单张立绘不变（这是有意的，不给他们编造表情）。
+var EXPR_CHARACTER = 'fish'
+var EXPR_HAPPY = 0     // expression_11 开口笑 —— 常态
+var EXPR_NERVOUS = 1   // expression_22 闭眼皱眉 —— 扣费动画播放中
+var EXPR_ALOOF = 2     // expression_12 鼓嘴 —— 米饭盆超时没接
+var EXPR_CALM = 3      // expression_21 面无表情 —— 铁锅扣在头上
+// 下标即表情编号，顺序照抄上游（不是文件名顺序）
+var EXPR_FILES = ['expression_11.png', 'expression_22.png', 'expression_12.png', 'expression_21.png']
+var NERVOUS_HOLD_SEC = 1.0   // 上游 NervousHoldSec：最后一次扣费后继续皱眉的时长
+var BOWL_WAIT_SEC = 10.0     // 上游 BowlWaitSec：盆放多久没接就翻脸
+
+var exprImages = []
+var hasExpressions = false
+var exprIdx = EXPR_HAPPY
+var nervousT = 0
+var bowlWait = 0
+// 三期（米饭盆玩法）会去驱动这三个标志；二期先把状态机接好
+var exprBowlAlive = false    // 场上有未接的米饭盆
+var exprBowlLocked = false   // 盆已被锁定（正在被吸走）
+var exprPotOnHead = false    // 铁锅扣在头上
 var POLL_OPTIONS = [10, 30, 60, 300]
 var SOUND_POOL = 4
 var SOUND_VOLUME = 0.7
@@ -74,7 +116,10 @@ var STORE_KEY = 'dshBalancePet.state.v1'
 var state = {
   character: 'fish',
   sizeIndex: 1,
+  sizePx: 0,           // >0 表示用了「自定义尺寸」，此时忽略 sizeIndex
   soundOn: true,
+  volume: 80,          // 0..100（上游默认 80）；0 = 静音
+  theme: 'light',      // 菜单配色：light | dark
   snapOnRelease: true,
   pollSeconds: 30,
   hidden: false,
@@ -90,7 +135,12 @@ function loadState() {
     if (!o || typeof o !== 'object') return
     if (typeof o.character === 'string') state.character = o.character
     if (typeof o.sizeIndex === 'number' && o.sizeIndex >= 0 && o.sizeIndex < SIZE_PRESETS.length) state.sizeIndex = o.sizeIndex
+    if (typeof o.sizePx === 'number' && isFinite(o.sizePx) && o.sizePx >= 0) state.sizePx = Math.round(o.sizePx)
     if (typeof o.soundOn === 'boolean') state.soundOn = o.soundOn
+    if (typeof o.volume === 'number' && isFinite(o.volume)) {
+      state.volume = Math.max(0, Math.min(100, Math.round(o.volume)))
+    }
+    if (o.theme === 'dark' || o.theme === 'light') state.theme = o.theme
     if (typeof o.snapOnRelease === 'boolean') state.snapOnRelease = o.snapOnRelease
     if (typeof o.pollSeconds === 'number') state.pollSeconds = clampPoll(o.pollSeconds)
     if (typeof o.source === 'string' && o.source) state.source = o.source
@@ -176,7 +226,8 @@ function log() {
 // 布局
 // ============================================================================
 function layout() {
-  side = SIZE_PRESETS[state.sizeIndex] || 150
+  // 自定义尺寸优先；否则用预设档位
+  side = state.sizePx > 0 ? state.sizePx : (SIZE_PRESETS[state.sizeIndex] || 150)
   W = side * 1.5
   H = side * 1.55
   var sw = side * 0.94 * 1.5
@@ -235,9 +286,473 @@ function activeSpriteFile() {
   return ch.sprite
 }
 
+// 载入四张表情立绘。**四张全成功才启用** —— 上游同样的取舍：
+// 半套会让角色在表情与单图之间闪，比不加还难看。
+function loadExpressionArt() {
+  if (!(state.character === EXPR_CHARACTER)) { hasExpressions = false; return Promise.resolve(false) }
+  if (hasExpressions) return Promise.resolve(true)
+  return Promise.all(EXPR_FILES.map(function (f) {
+    return new Promise(function (res) {
+      var img = new Image()
+      img.onload = function () { res(img) }
+      img.onerror = function () { res(null) }
+      img.src = PREFIX + '/expr/' + f
+    })
+  })).then(function (list) {
+    var got = list.filter(function (x) { return !!x }).length
+    if (got !== EXPR_FILES.length) {
+      hasExpressions = false
+      log('表情立绘只加载到 ' + got + '/' + EXPR_FILES.length + '，保持单图模式')
+      return false
+    }
+    exprImages = list
+    hasExpressions = true
+    exprIdx = EXPR_HAPPY
+    draw()
+    return true
+  })
+}
+
+// 当前该用哪张表情图；不给用时返回 null（走单张立绘那条路）
+function expressionFile() {
+  if (!hasExpressions) return null
+  var ch = activeChar()
+  if (!ch || ch.id !== EXPR_CHARACTER) return null
+  // 未连接时用的是「抱盆」那张独立立绘，优先于表情
+  if (ch.offlineSprite && !connected) return null
+  return EXPR_FILES[exprIdx] || null
+}
+
+function setExpression(i) {
+  if (i === exprIdx) return
+  exprIdx = i
+  draw()
+}
+
+// 表情状态机。优先级与上游逐条对齐：
+//   铁锅在头上（且场上无盆）  >  正在扣费（含结束后 1 秒保持）  >  盆超时未接  >  常态
+function updateExpression(dt) {
+  if (!hasExpressions) return
+  var ch = activeChar()
+  if (!ch || ch.id !== EXPR_CHARACTER) { setExpression(EXPR_HAPPY); return }
+
+  // 「有扣费正在播」看的是**动画本身**，不是欠了多少钱 —— 上游特意踩过这个坑
+  var cueRunning = shakeTime > 0 || demoRestoreTime > 0
+  if (exprBowlAlive && !cueRunning && !exprBowlLocked) bowlWait += dt
+  else if (!exprBowlAlive) bowlWait = 0
+
+  var want
+  if (exprPotOnHead && !exprBowlAlive) {
+    want = EXPR_CALM
+  } else if (cueRunning) {
+    want = EXPR_NERVOUS
+    nervousT = NERVOUS_HOLD_SEC
+  } else if (nervousT > 0) {
+    want = EXPR_NERVOUS
+  } else if (bowlWait >= BOWL_WAIT_SEC) {
+    want = EXPR_ALOOF
+  } else {
+    want = EXPR_HAPPY
+  }
+  setExpression(want)
+}
+
+// ============================================================================
+// 米饭盆充值玩法（来自上游 VK-1 v2）
+// ============================================================================
+// 上游是整屏覆盖层：盆在显示器上飞、撞屏幕边缘弹、可用磁铁吸走。
+// 这里同样用**全屏覆盖层**：盆可以落在**整个 DSH 窗口底部的任意位置**，
+// 而不是只在挂件那一小块画布里。重力 / 弹性 / 反弹次数 / 空气阻力 / 滑动摩擦
+// 这些参数照抄上游；交互改成「点一下盆 = 投喂」。
+//
+// 坐标约定：**盆 / 爱心 / 铁锅 / 雷达名牌全部用视口坐标**（相对窗口左上角），
+// 画在独立的 #dshpet-rice 覆盖层上；只有挂件本身用画布局部坐标。
+var RICE_GRAVITY = 2100        // 上游 RiceGravity（px/s²）
+var RICE_RESTITUTION = 0.5     // 上游 RiceRestitution
+var RICE_MAX_BOUNCES = 3       // 上游 RiceMaxBounces
+var RICE_AIR_DRAG = 0.30       // 上游 RiceAirDrag
+var RICE_SLIDE_FRICTION = 1.40 // 上游 RiceSlideFriction
+var RICE_SLIDE_STOP = 14       // 上游 RiceSlideStop（px/s，低于它就停下）
+var HEART_LIFE = 1.5
+var FEED_FADE = 0.5
+
+var riceImg = null
+var ironImg = null
+var rice = null          // 场上同时只允许一个盆（与上游一致）
+var hearts = []          // 投喂时飘起的像素爱心
+var feedSound = null
+var radarOn = false      // 「打开火控雷达」：给盆挂一个锁定名牌
+var potPendT = 0         // 投喂后延迟一小会儿再把锅丢下来
+var riceEl = null        // 全屏覆盖层画布
+var riceCtx = null
+
+function viewW() { return Math.max(1, window.innerWidth) }
+function viewH() { return Math.max(1, window.innerHeight) }
+// 地面 = 窗口底边往上留一点，让盆看着是落在地上而不是贴着边缘
+function riceGroundY() { return viewH() - Math.max(4, side * 0.03) }
+// 角色头部在**视口坐标**里的位置（盆/锅/爱心/雷达都以它为参照）
+//
+// 头的水平位置**从立绘的 alpha 掩码里量出来**，不写死。
+// 起因：换过一版立绘后角色在画布里的位置变了（头从水平居中挪到了约 0.66 处），
+// 写死 0.5 会把锅扣在她左边的头发上。量法：取最上面那一段不透明像素
+//（头顶 + 发饰）的水平中心当作「头」。掩码是 384x256（原图 1/4），够精细。
+// 拿不到掩码时退回居中的经验值。
+var HEAD_BAND = 0.10              // 取最上方 10% 高度来找头顶
+var HEAD_ANCHOR_FALLBACK = { x: 0.5, y: 0.06 }
+var headAnchor = { x: HEAD_ANCHOR_FALLBACK.x, y: HEAD_ANCHOR_FALLBACK.y }
+
+function computeHeadAnchor() {
+  var m = masks[activeSpriteFile()]
+  if (!m || !m.data) {
+    headAnchor = { x: HEAD_ANCHOR_FALLBACK.x, y: HEAD_ANCHOR_FALLBACK.y }
+    return
+  }
+  var bandY = Math.max(1, Math.round(m.h * HEAD_BAND))
+  var lo = m.w, hi = -1
+  for (var y = 0; y < bandY; y++) {
+    for (var x = 0; x < m.w; x++) {
+      if (m.data[(y * m.w + x) * 4 + 3] > 40) {
+        if (x < lo) lo = x
+        if (x > hi) hi = x
+      }
+    }
+  }
+  if (hi < 0) {
+    headAnchor = { x: HEAD_ANCHOR_FALLBACK.x, y: HEAD_ANCHOR_FALLBACK.y }
+    return
+  }
+  headAnchor = { x: ((lo + hi) / 2) / m.w, y: HEAD_ANCHOR_FALLBACK.y }
+  log('头顶锚点 x=' + headAnchor.x.toFixed(3) + '（量自立绘最上方 ' + (HEAD_BAND * 100) + '%）')
+}
+
+function headPoint() {
+  var bx = (typeof state.x === 'number') ? state.x : ANCHOR_MARGIN
+  var by = (typeof state.y === 'number') ? state.y : 0
+  return {
+    x: bx + spriteRect.x + spriteRect.w * headAnchor.x,
+    y: by + spriteRect.y + spriteRect.h * headAnchor.y,
+  }
+}
+
+function loadTopupArt() {
+  function one(url) {
+    return new Promise(function (res) {
+      var img = new Image()
+      img.onload = function () { res(img) }
+      img.onerror = function () { res(null) }
+      img.src = url
+    })
+  }
+  return Promise.all([one(PREFIX + '/rice.png'), one(PREFIX + '/iron_bowl.png')])
+    .then(function (list) {
+      riceImg = list[0]; ironImg = list[1]
+      return true
+    })
+}
+
+function playFeedSound() {
+  try {
+    if (!state.soundOn || !(state.volume > 0)) return
+    if (!feedSound) { feedSound = new Audio(PREFIX + '/sound/feed.mp3'); feedSound.preload = 'auto' }
+    feedSound.volume = Math.max(0, Math.min(100, state.volume)) / 100
+    try { feedSound.currentTime = 0 } catch (e) {}
+    var p = feedSound.play()
+    if (p && p.catch) p.catch(function () {})
+  } catch (err) {}
+}
+
+function spawnRice(amount) {
+  if (!riceImg || rice) return
+  var r = Math.max(10, side * 0.13)
+  // 落点在**整个窗口宽度**里随机 —— 不再局限于挂件画布，也不再需要靠 alpha 掩码
+  // 去躲开角色：窗口底部绝大多数位置本来就不在角色身上。
+  var lo = r + side * 0.02, hi = viewW() - r - side * 0.02
+  var startX = hi > lo ? lo + Math.random() * (hi - lo) : viewW() * 0.5
+  rice = {
+    x: startX,
+    y: -r,
+    // 上游有一支就是 VX=-120 / VY=40；这里保留一点横向漂移，落点仍是随机散布
+    vx: (Math.random() - 0.5) * side * 1.6,
+    vy: 40,
+    r: r,
+    bounces: 0,
+    fed: false,
+    fedT: 0,
+    iron: false,
+    onHead: false,
+    born: 0,
+    amount: amount || 0,
+  }
+  exprBowlAlive = true
+  exprBowlLocked = false
+  wake()
+}
+
+function spawnIronPot() {
+  if (!ironImg || rice) return
+  // 铁锅直接「出现」并落下，不飞行（上游 SpawnIronPot：VX=VY=0）。
+  // 它是**独立的一个物体**，不依附之前那个已被投喂的盆 —— 早期写法复用了 rice，
+  // 但投喂后盆 0.5 秒就淡出了，等 1.2 秒来掉锅时已经没有载体，锅永远出不来。
+  var rp = Math.max(12, side * 0.19)
+  var hp = headPoint()
+  rice = {
+    // 从她头顶正上方落下来，这样才能扣到头上
+    x: hp.x,
+    y: -rp,
+    vx: 0,
+    vy: 0,
+    r: rp,
+    bounces: 0,
+    fed: false,
+    fedT: 0,
+    iron: true,
+    onHead: false,
+    born: 0,
+    amount: 0,
+  }
+  wake()
+}
+
+// 把头上的锅敲掉（上游是双击头部）
+function knockPotOff() {
+  if (!rice || !rice.onHead) return
+  rice.onHead = false
+  rice.vy = -side * 0.55
+  rice.vx = (Math.random() - 0.5) * side * 1.2
+  rice.bounces = 0
+  exprPotOnHead = false
+  wake()
+}
+
+function updateRice(dt) {
+  if (potPendT > 0) {
+    potPendT -= dt
+    if (potPendT <= 0) spawnIronPot()
+  }
+  if (!rice) { exprBowlAlive = false; exprPotOnHead = false; return }
+  // 上游的 anyBowl **排除铁锅**：锅在头上不该把「盆没接」的计时算进去，
+  // 也不该挡住 CALM 的判定（CALM 的条件正是「头上有锅 且 场上没有盆」）。
+  exprBowlAlive = !rice.iron && !rice.fed
+
+  var r = rice
+  if (r.fed) {
+    r.fedT += dt
+    if (r.fedT >= FEED_FADE) { rice = null; exprBowlAlive = false }
+    return
+  }
+  r.born += dt
+  var hp = headPoint()
+
+  if (r.onHead) {
+    // 戴上之后物理关闭，位置绑在头上（上游同）。注意是**视口坐标**，
+    // 所以角色被拖走时锅会跟着走。
+    r.x = hp.x
+    r.y = hp.y
+    exprPotOnHead = true
+    return
+  }
+  exprPotOnHead = false
+
+  // 铁锅落到头部高度就「戴上」（上游有 HeadFalling → OnHead 两段，这里合一）
+  if (r.iron && (r.y + r.r * 0.35) >= hp.y) {
+    r.onHead = true
+    r.vx = 0; r.vy = 0
+    wake()
+    return
+  }
+
+  // 重力 + 空气阻力
+  r.vy += RICE_GRAVITY * dt
+  var drag = Math.max(0, 1 - RICE_AIR_DRAG * dt)
+  r.vx *= drag
+  r.vy *= drag
+  r.x += r.vx * dt
+  r.y += r.vy * dt
+
+  // 左右墙 = 窗口左右边
+  var vw = viewW()
+  if (r.x - r.r < 0) { r.x = r.r; r.vx = Math.abs(r.vx) * RICE_RESTITUTION }
+  if (r.x + r.r > vw) { r.x = vw - r.r; r.vx = -Math.abs(r.vx) * RICE_RESTITUTION }
+
+  // 地面 = 窗口底边：弹几下之后转为滑动，最后停住
+  var floor = riceGroundY()
+  if (r.y + r.r > floor) {
+    r.y = floor - r.r
+    if (Math.abs(r.vy) > 90 && r.bounces < RICE_MAX_BOUNCES) {
+      r.vy = -Math.abs(r.vy) * RICE_RESTITUTION
+      r.bounces += 1
+    } else {
+      r.vy = 0
+      // 滑动摩擦
+      var f = RICE_SLIDE_FRICTION * dt * 60
+      if (Math.abs(r.vx) <= RICE_SLIDE_STOP) r.vx = 0
+      else r.vx -= Math.sign(r.vx) * Math.min(Math.abs(r.vx), f * 8)
+    }
+  }
+}
+
+// 投喂：把盆递给她
+function feedRice() {
+  if (!rice || rice.fed) return
+  rice.fed = true
+  rice.fedT = 0
+  // 锅只在**非铁锅**的盆被投喂后才出现，且场上只能有一个
+  if (!rice.iron) potPendT = 1.2
+  spawnHearts()
+  playFeedSound()
+  wake()
+}
+
+function spawnHearts() {
+  // 爱心从**她的头**上飘起来（视口坐标），而不是从盆的位置
+  var hp = headPoint()
+  for (var i = 0; i < 5; i++) {
+    hearts.push({
+      x: hp.x + (Math.random() - 0.5) * side * 0.28,
+      y: hp.y + (Math.random() - 0.5) * side * 0.1,
+      vx: (Math.random() - 0.5) * side * 0.5,
+      vy: -side * (0.45 + Math.random() * 0.35),
+      age: 0,
+      size: Math.max(7, side * 0.075) * (0.75 + Math.random() * 0.5),
+    })
+  }
+}
+
+function updateHearts(dt) {
+  for (var i = hearts.length - 1; i >= 0; i--) {
+    var h = hearts[i]
+    h.age += dt
+    h.x += h.vx * dt
+    h.y += h.vy * dt
+    h.vy += side * 0.35 * dt          // 轻微下坠，飘得更自然
+    if (h.age >= HEART_LIFE) hearts.splice(i, 1)
+  }
+}
+
+// 像素爱心（方块拼的，与上游一致）
+var HEART_MASK = [
+  '01100110',
+  '11111111',
+  '11111111',
+  '11111111',
+  '01111110',
+  '00111100',
+  '00011000',
+]
+function drawHeartsOn(c) {
+  if (!hearts.length) return
+  for (var i = 0; i < hearts.length; i++) {
+    var h = hearts[i]
+    var t = h.age / HEART_LIFE
+    c.save()
+    c.globalAlpha = Math.max(0, 1 - t * t)
+    var px = h.size / 8
+    c.fillStyle = '#ff4d6d'
+    for (var ry = 0; ry < HEART_MASK.length; ry++) {
+      for (var rx = 0; rx < 8; rx++) {
+        if (HEART_MASK[ry].charAt(rx) === '1') {
+          c.fillRect(h.x + (rx - 4) * px, h.y + (ry - 3.5) * px, px + 0.6, px + 0.6)
+        }
+      }
+    }
+    c.restore()
+  }
+}
+
+function drawRiceOn(c) {
+  if (!rice) return
+  var r = rice
+  var img = r.iron ? ironImg : riceImg
+  if (!img) return
+  var size = r.r * 2
+  c.save()
+  if (r.fed) c.globalAlpha = Math.max(0, 1 - r.fedT / FEED_FADE)
+  c.drawImage(img, r.x - r.r, r.y - r.r, size, size)
+  c.restore()
+  if (radarOn && !r.fed) drawRadar(c, r)
+}
+
+// 全屏覆盖层：清空后重画盆 / 爱心 / 雷达名牌。
+// 每帧都清一遍 —— 否则上一帧的盆会留在画面上擦不掉。
+function drawRiceLayer() {
+  if (!riceCtx || !riceEl) return
+  if (!rice && !hearts.length) {
+    // 没东西可画时也要清掉残留（比如盆刚被投喂淡出）
+    if (riceEl._dirty !== false) {
+      riceCtx.setTransform(1, 0, 0, 1, 0, 0)
+      riceCtx.clearRect(0, 0, riceEl.width, riceEl.height)
+      riceEl._dirty = false
+    }
+    return
+  }
+  var dpr = Math.min(3, window.devicePixelRatio || 1)
+  var pw = Math.round(viewW() * dpr), ph = Math.round(viewH() * dpr)
+  if (riceEl.width !== pw || riceEl.height !== ph) {
+    riceEl.width = pw
+    riceEl.height = ph
+    riceEl.style.width = viewW() + 'px'
+    riceEl.style.height = viewH() + 'px'
+  }
+  riceCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  riceCtx.clearRect(0, 0, viewW(), viewH())
+  riceEl._dirty = true
+  drawRiceOn(riceCtx)
+  drawHeartsOn(riceCtx)
+}
+
+// 「打开火控雷达」：皇牌空战风格的目标名牌 —— 括号 + 类型/距离/接近率/高度/方位。
+// 全部用视口坐标；距离/高度/方位都以**角色的头**为参照。
+function drawRadar(c, r) {
+  var w = r.r * 1.9, h = r.r * 1.9
+  var cx = r.x, cy = r.y
+  var hp = headPoint()
+  var px = cx - hp.x
+  var py = cy - hp.y
+  var dist = Math.sqrt(px * px + py * py) + 1
+  var alt = riceGroundY() - cy
+  var dir = (Math.atan2(px, -py) * 180 / Math.PI + 360) % 360
+  var closure = (-(px * r.vx + py * r.vy) / dist)
+
+  c.save()
+  c.strokeStyle = '#39ff88'
+  c.fillStyle = '#39ff88'
+  c.lineWidth = Math.max(1, side * 0.006)
+  c.font = Math.max(8, side * 0.055) + 'px ui-monospace,Consolas,monospace'
+  c.textBaseline = 'middle'
+  // 四个角括号
+  var L = Math.max(5, side * 0.045)
+  var x0 = cx - w / 2, x1 = cx + w / 2, y0 = cy - h / 2, y1 = cy + h / 2
+  var corners = [[x0, y0, 1, 1], [x1, y0, -1, 1], [x0, y1, 1, -1], [x1, y1, -1, -1]]
+  for (var i = 0; i < corners.length; i++) {
+    var q = corners[i]
+    c.beginPath()
+    c.moveTo(q[0] + q[2] * L, q[1]); c.lineTo(q[0], q[1]); c.lineTo(q[0], q[1] + q[3] * L)
+    c.stroke()
+  }
+  // 名牌文字：贴着括号右下往外排，靠右边时改到左侧，免得跑出窗口
+  var lines = [
+    r.iron ? '铁锅' : '白饭',
+    'DIST ' + Math.round(dist) + 'px',
+    'CLOSE ' + (closure >= 0 ? '+' : '') + closure.toFixed(0) + 'px/s',
+    'ALT ' + Math.round(alt) + 'px',
+    'DIR ' + Math.round(dir).toString().padStart(3, '0') + '°',
+  ]
+  var lh = Math.max(8, side * 0.055) * 1.2
+  var tw = 0
+  for (var m = 0; m < lines.length; m++) {
+    var mt = c.measureText ? c.measureText(lines[m]).width : 0
+    if (mt > tw) tw = mt
+  }
+  var left = x0 - Math.max(6, side * 0.04) - tw
+  var tx = (left > 4) ? left : (x1 + Math.max(4, side * 0.03))
+  for (var k = 0; k < lines.length; k++) {
+    c.fillText(lines[k], tx, y0 + k * lh)
+  }
+  c.restore()
+}
+
 // 画布坐标 → 命中判定
-function hitTest(cx, cy) {
-  if (!inBodyBand(cy)) return false
+function hitTest(cx, cy) {  if (!inBodyBand(cy)) return false
   if (cx < spriteRect.x || cx > spriteRect.x + spriteRect.w) return false
   if (cy < spriteRect.y || cy > spriteRect.y + spriteRect.h) return false
   var f = activeSpriteFile()
@@ -299,6 +814,9 @@ function draw() {
   var ch = activeChar()
   var file = activeSpriteFile()
   var img = file ? images[file] : null
+  // 表情启用时用表情图顶掉单张立绘（只有大肥鱼有表情）
+  var ef = expressionFile()
+  if (ef && exprImages[exprIdx]) img = exprImages[exprIdx]
 
   // 震动：原版施加在**整个上下文**上，所以精灵和文字一起抖。
   // 这里不真的去 translate，而是把同一个偏移量分别喂给精灵和仿射矩阵 ——
@@ -325,13 +843,26 @@ function draw() {
   var sy = spriteRect.y + shakeY
 
   if (img) {
-    ctx.drawImage(img, sx, sy, spriteRect.w, spriteRect.h)
+    // 按**原图宽高比**等比缩放，而不是硬铺满 spriteRect。
+    // 原因：spriteRect 是按立绘 1536x1024（1.5:1）算出来的，而表情立绘是 1024x1024 正方形 ——
+    // 铺满会把角色横向拉长 1.5 倍（这就是「大肥鱼被拉长」的原因）。
+    // 这里以**高度**为基准对齐：角色在两种图里高度一致，换表情不会跳大小。
+    // 对 1536x1024 的立绘本身，这个式子算出来正好等于 spriteRect，是恒等变换。
+    var dw = spriteRect.w, dh = spriteRect.h, dx = sx, dy = sy
+    if (img.width > 0 && img.height > 0) {
+      var k = spriteRect.h / img.height
+      dh = spriteRect.h
+      dw = img.width * k
+      dx = sx + (spriteRect.w - dw) / 2
+      dy = sy + (spriteRect.h - dh) / 2
+    }
+    ctx.drawImage(img, dx, dy, dw, dh)
     // 红闪：source-atop 只覆盖不透明像素，保住精灵轮廓（原版 blendMode = .sourceAtop）
     var impact = Math.max(flashImpact(), celebrateImpact())
     if (impact > 0) {
       ctx.globalCompositeOperation = 'source-atop'
       ctx.fillStyle = C_FLASH + (0.45 * impact) + ')'
-      ctx.fillRect(sx, sy, spriteRect.w, spriteRect.h)
+      ctx.fillRect(dx, dy, dw, dh)
       ctx.globalCompositeOperation = 'source-over'
     }
   } else {
@@ -354,6 +885,9 @@ function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   drawTopupRing()
   drawFloating()
+
+  // 米饭盆 / 爱心 / 雷达画在**独立的窗口级覆盖层**上（视口坐标）
+  drawRiceLayer()
 }
 
 function flashImpact() {
@@ -550,6 +1084,10 @@ function tick(dt) {
   if (shakeTime > 0) shakeTime = Math.max(0, shakeTime - dt)
   if (celebrateTime > 0) celebrateTime = Math.max(0, celebrateTime - dt)
   if (topupTime > 0) topupTime = Math.max(0, topupTime - dt)
+  if (nervousT > 0) nervousT = Math.max(0, nervousT - dt)
+  updateRice(dt)
+  updateHearts(dt)
+  updateExpression(dt)
   if (demoRestoreTime > 0) {
     demoRestoreTime = Math.max(0, demoRestoreTime - dt)
     if (demoRestoreTime === 0) demoOffset = 0
@@ -598,7 +1136,10 @@ function tick(dt) {
 
 function needsAnimation() {
   return shakeTime > 0 || celebrateTime > 0 || topupTime > 0 || demoRestoreTime > 0 ||
-    floating.length > 0 || pendingSteps > 0 || demoRemaining > 0 || !!snapAnim
+    floating.length > 0 || pendingSteps > 0 || demoRemaining > 0 || !!snapAnim ||
+    // 表情状态机也得算「还忙」：紧张表情的最后 1 秒保持靠 tick 倒数，
+    // 漏掉这一项的话扣费动画一停、帧循环就断，表情会永远卡在紧张上。
+    nervousT > 0 || exprBowlAlive || !!rice || hearts.length > 0 || potPendT > 0
 }
 
 function frame(ts) {
@@ -637,6 +1178,8 @@ function applyReading(cents, snap) {
     forceSnapToReal()
     topupTime = TOPUP_DURATION
     appendLabel('+' + fenString(delta), C_TOPUP)
+    // 充值就掉一个米饭盆（上游的核心玩法）
+    spawnRice(delta / 100)
     wake()
     return
   }
@@ -848,12 +1391,39 @@ function onPointerDown(e) {
   // mousedown→mouseup 之间被 display:none 掉，元素不再渲染 ⇒ click 永远不派发，
   // 于是所有**子菜单项**（切换角色 / 尺寸 / 刷新间隔 / 演示连续扣费）全部点不动。
   if (isInMenu(e.target)) return
+
+  // 米饭盆与铁锅**现在活动在整个窗口里**，所以必须在「是否落在挂件盒子里」之前判定，
+  // 而且用的是**视口坐标**（e.clientX/Y），不是画布局部坐标。
+  // 命中时吞掉事件：同一击不该再落到下面的 DSH 界面上。
+  if (e.button !== 2 && !e.ctrlKey) {
+    if (rice && !rice.fed) {
+      var bdx = e.clientX - rice.x, bdy = e.clientY - rice.y
+      if (Math.sqrt(bdx * bdx + bdy * bdy) <= rice.r * 1.3) {
+        e.preventDefault(); e.stopPropagation()
+        feedRice()
+        return
+      }
+    }
+    if (rice && rice.onHead) {
+      var hp = headPoint()
+      if (Math.abs(e.clientX - hp.x) <= spriteRect.w * 0.35 &&
+          e.clientY >= hp.y - spriteRect.h * 0.15 &&
+          e.clientY <= hp.y + spriteRect.h * 0.35) {
+        e.preventDefault(); e.stopPropagation()
+        knockPotOff()
+        return
+      }
+    }
+  }
+
   if (menuOpen()) hideMenu()
   var p = localPoint(e)
   var inside = p.x >= 0 && p.y >= 0 && p.x <= W && p.y <= H
-  if (!inside || !hitTest(p.x, p.y)) return
+  if (!inside) return
 
   if (e.button === 2 || e.ctrlKey) return // 右键交给 contextmenu
+
+  if (!hitTest(p.x, p.y)) return
 
   // 原版：拖动要超过 2pt 才真的动，避免一次点击把摆好的位置蹭歪
   dragging = {
@@ -920,12 +1490,191 @@ function hideMenu() {
   if (menuEl.root) menuEl.root.style.display = 'none'
 }
 
+// ============================================================================
+// 通用输入弹层（自定义尺寸 / 自定义音量共用）
+// ============================================================================
+var promptOverlay = null
+
+function closePrompt() {
+  var o = promptOverlay
+  if (!o) return
+  promptOverlay = null
+  try { document.removeEventListener('keydown', o.onKey, true) } catch (err) {}
+  try { if (o.root.parentNode) o.root.parentNode.removeChild(o.root) } catch (err) {}
+}
+
+function showPrompt(opt) {
+  closePrompt()
+  var root = document.createElement('div')
+  root.id = 'dshpet-prompt'
+  var box = document.createElement('div')
+  box.className = 'dshpet-lic-box'
+  var head = document.createElement('div')
+  head.className = 'dshpet-lic-title'
+  head.textContent = String(opt.title || '')
+  var lab = document.createElement('div')
+  lab.className = 'dshpet-prompt-label'
+  lab.textContent = String(opt.label || '')
+  var wrap = document.createElement('div')
+  wrap.className = 'dshpet-prompt-row'
+  var inp = document.createElement('input')
+  inp.type = 'text'
+  inp.className = 'dshpet-prompt-inp'
+  inp.value = (opt.value === undefined || opt.value === null) ? '' : String(opt.value)
+  wrap.appendChild(inp)
+  if (opt.suffix) {
+    var suf = document.createElement('span')
+    suf.className = 'dshpet-prompt-suf'
+    suf.textContent = String(opt.suffix)
+    wrap.appendChild(suf)
+  }
+  var msg = document.createElement('div')
+  msg.className = 'dshpet-hol-msg'
+  var actions = document.createElement('div')
+  actions.className = 'dshpet-hol-row dshpet-hol-actions'
+  var okBtn = document.createElement('button')
+  okBtn.type = 'button'
+  okBtn.className = 'dshpet-hol-btn dshpet-hol-primary'
+  okBtn.textContent = '确定'
+  var cancel = document.createElement('button')
+  cancel.type = 'button'
+  cancel.className = 'dshpet-hol-btn'
+  cancel.textContent = '取消'
+  actions.appendChild(okBtn)
+  actions.appendChild(cancel)
+  box.appendChild(head)
+  box.appendChild(lab)
+  box.appendChild(wrap)
+  box.appendChild(msg)
+  box.appendChild(actions)
+  root.appendChild(box)
+  ;(document.body || document.documentElement).appendChild(root)
+  var o = { root: root }
+  promptOverlay = o
+
+  function submit() {
+    // onOk 返回 true 才关闭；返回 false 表示校验没过，弹层留着让用户改
+    var keep = opt.onOk ? opt.onOk(String(inp.value).trim(), msg) : true
+    if (keep !== false) closePrompt()
+  }
+  okBtn.addEventListener('click', submit)
+  inp.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { ev.preventDefault(); submit() }
+  })
+  cancel.addEventListener('click', function () { closePrompt() })
+  root.addEventListener('pointerdown', function (ev) { if (ev.target === root) closePrompt() })
+  o.onKey = function (ev) { if (ev.key === 'Escape') closePrompt() }
+  document.addEventListener('keydown', o.onKey, true)
+  try { inp.focus() } catch (err) {}
+  try { inp.select() } catch (err) {}
+}
+
+// ============================================================================
+// 显示设置（尺寸 / 外观 / 声音）
+// ============================================================================
+function setSizeIndex(i) {
+  if (!(i >= 0 && i < SIZE_PRESETS.length)) return
+  state.sizeIndex = i
+  state.sizePx = 0            // 选预设就清掉自定义值
+  saveState(); layout(); place(); draw()
+}
+
+function askSize() {
+  showPrompt({
+    title: '自定义尺寸',
+    label: '高度（像素）—— 可用范围 120 ~ 1200；宽度按 1.5 倍自动计算。',
+    value: state.sizePx > 0 ? state.sizePx : SIZE_PRESETS[state.sizeIndex],
+    suffix: 'px',
+    onOk: function (v, msg) {
+      var n = parseInt(v, 10)
+      if (!isFinite(n) || String(n) !== v) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入整数像素值'
+        return false
+      }
+      if (n < 120 || n > 1200) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '超出范围：' + n + ' px（应在 120 ~ 1200 之间）'
+        return false
+      }
+      state.sizePx = n
+      saveState(); layout(); place(); draw()
+      return true
+    },
+  })
+}
+
+function setTheme(t) {
+  state.theme = (t === 'dark') ? 'dark' : 'light'
+  saveState()
+  // 菜单每次打开都会重建，所以下一次右键就是新配色，不需要额外重绘
+}
+
+function setSoundOn(on) {
+  state.soundOn = !!on
+  // 打开声音时若音量还是 0，恢复到一个能听见的默认值，否则「开启」等于没开
+  if (state.soundOn && !(state.volume > 0)) state.volume = 80
+  saveState()
+  if (state.soundOn) playSoundFile('turn')
+}
+
+function setVolume(v) {
+  var pct = Math.max(0, Math.min(100, Math.round(Number(v) || 0)))
+  state.volume = pct
+  // 与上游一致：0% 就是静音，所以开关必须跟着走，否则菜单会出现「声音开着但没声」
+  state.soundOn = pct > 0
+  saveState()
+  // 放一小段，让新音量立刻听得出来
+  if (state.soundOn) playSoundFile('turn')
+}
+
+function askVolume() {
+  showPrompt({
+    title: '自定义音量',
+    label: '音量百分比（0 ~ 100）。填 0 等于静音。',
+    value: state.volume,
+    suffix: '%',
+    onOk: function (v, msg) {
+      if (!/^\d+$/.test(v)) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入 0 ~ 100 的整数'
+        return false
+      }
+      var n = parseInt(v, 10)
+      if (n < 0 || n > 100) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '超出范围：' + n + '（应在 0 ~ 100 之间）'
+        return false
+      }
+      setVolume(n)
+      return true
+    },
+  })
+}
+
 function showMenu(cx, cy, sub) {
   var root = menuEl.root
   root.innerHTML = ''
+  // 菜单配色跟随「外观」里的设置（浅色 / 深色），只是菜单换色，角色本身不受影响
+  root.className = state.theme === 'dark' ? 'is-dark' : ''
   var items = (typeof sub === 'function' ? sub() : sub) || mainMenu()
   for (var i = 0; i < items.length; i++) {
     ;(function (it) {
+      // 分隔线
+      if (it.sep) {
+        var hr = document.createElement('div')
+        hr.className = 'dshpet-msep'
+        root.appendChild(hr)
+        return
+      }
+      // 分组标题（不可点）
+      if (it.header) {
+        var hd = document.createElement('div')
+        hd.className = 'dshpet-mhead'
+        hd.textContent = it.label
+        root.appendChild(hd)
+        return
+      }
       var row = document.createElement('div')
       row.className = 'dshpet-mi'
       row.textContent = it.label
@@ -959,7 +1708,7 @@ function mainMenu() {
       return ((manifest && manifest.characters) || []).map(function (c) {
         return {
           label: (c.id === state.character ? '✓ ' : '　') + c.name,
-          run: function () { state.character = c.id; saveState(); refreshAssets() },
+          run: function () { state.character = c.id; saveState(); refreshAssets(); loadExpressionArt() },
         }
       }).concat([{ label: '返回', sub: mainMenu }])
     } },
@@ -990,15 +1739,43 @@ function mainMenu() {
     { label: (holidayStatus && holidayStatus.level !== 'ok' ? '⚠ ' : '') + '节假日清单…',
       run: function () { showHolidayPanel() } },
     { label: '尺寸 ▸', sub: function () {
-      var names = ['小', '中', '大', '特大']
+      // 命名与「带 px 标注」沿用上游；本插件多一档小号，所以是四档
       return SIZE_PRESETS.map(function (px, i) {
         return {
-          label: (i === state.sizeIndex ? '✓ ' : '　') + names[i] + '（' + px + '）',
-          run: function () { state.sizeIndex = i; saveState(); layout(); place(); draw() },
+          label: (state.sizePx <= 0 && i === state.sizeIndex ? '✓ ' : '　') + SIZE_NAMES[i] +
+            '（' + px + ' px ≈ ' + pxToCm(px) + ' cm）',
+          run: function () { setSizeIndex(i) },
         }
-      }).concat([{ label: '返回', sub: mainMenu }])
+      }).concat([
+        { sep: true },
+        { label: '自定义尺寸…', run: function () { askSize() } },
+        { label: '返回', sub: mainMenu },
+      ])
     } },
-    { label: (state.soundOn ? '✓ ' : '　') + '音效', run: function () { state.soundOn = !state.soundOn; saveState() } },
+    { label: '外观 ▸', sub: function () {
+      return [
+        { label: (state.theme !== 'dark' ? '✓ ' : '　') + '浅色', run: function () { setTheme('light') } },
+        { label: (state.theme === 'dark' ? '✓ ' : '　') + '深色（DSH 风格）', run: function () { setTheme('dark') } },
+        { label: '返回', sub: mainMenu },
+      ]
+    } },
+    { label: '声音 ▸', sub: function () {
+      var items = [
+        { label: (state.soundOn ? '✓ ' : '　') + '开启声音', run: function () { setSoundOn(!state.soundOn) } },
+        { sep: true },
+        { label: '音量大小', header: true },
+      ]
+      VOLUME_STEPS.forEach(function (v) {
+        items.push({
+          label: (state.volume === v ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
+          run: function () { setVolume(v) },
+        })
+      })
+      items.push({ sep: true })
+      items.push({ label: '自定义音量…', run: function () { askVolume() } })
+      items.push({ label: '返回', sub: mainMenu })
+      return items
+    } },
     { label: (state.snapOnRelease ? '✓ ' : '　') + '松手吸附左下角', run: function () { state.snapOnRelease = !state.snapOnRelease; saveState() } },
     { label: '刷新间隔 ▸', sub: function () {
       var names = { 10: '10 秒', 30: '30 秒', 60: '1 分钟', 300: '5 分钟' }
@@ -1015,6 +1792,8 @@ function mainMenu() {
     { label: '立即刷新余额', run: function () { pollOnce(true, true) } },
     { label: '网络自检…', run: function () { showSelfCheck() } },
     { label: '测试一次扣费', run: function () { playDemo(1) } },
+    { label: '测试充值（掉米饭盆）', run: function () { spawnRice(1); if (rice) rice.y = side * 0.2 } },
+    { label: (radarOn ? '✓ ' : '　') + '打开火控雷达', run: function () { radarOn = !radarOn; wake() } },
     { label: '演示连续扣费 ▸', sub: function () {
       return [
         { label: '-0.05（5 次）', run: function () { playDemo(5) } },
@@ -1534,8 +2313,12 @@ function unlockAudio() {
 
 function playSoundFile(which) {
   try {
+    // 音量统一在这里施加：0% 就是静音，所以音量 0 时直接不发声音
+    var vol = state.soundOn ? Math.max(0, Math.min(100, state.volume)) / 100 : 0
+    if (vol <= 0) return
     if (which === 'turn') {
       if (!turnSound) { turnSound = new Audio(PREFIX + '/sound/turn.mp3'); turnSound.preload = 'auto' }
+      turnSound.volume = vol
       try { turnSound.currentTime = 0 } catch (e) {}
       var p = turnSound.play()
       if (p && p.catch) p.catch(function () {})
@@ -1543,6 +2326,7 @@ function playSoundFile(which) {
     }
     // 结算音 13.5 MB：**绝不预加载**，只在结算页真的打开时才创建并拉取
     if (!settleSound) { settleSound = new Audio(PREFIX + '/sound/settle.mp3'); settleSound.preload = 'none' }
+    settleSound.volume = vol
     try { settleSound.currentTime = 0 } catch (e) {}
     var p2 = settleSound.play()
     if (p2 && p2.catch) p2.catch(function () {})
@@ -1779,11 +2563,23 @@ function injectCss() {
     '#dshpet-root{position:fixed;left:14px;top:14px;pointer-events:none;user-select:none;' +
       '-webkit-user-select:none;z-index:9998;font-family:inherit}' +
     '#dshpet-canvas{display:block;pointer-events:none;-webkit-user-drag:none}' +
-    '#dshpet-menu{position:fixed;display:none;min-width:184px;box-sizing:border-box;background:rgba(255,255,255,.97);' +
-      'border:1px solid rgba(32,49,112,.35);border-radius:10px;padding:5px;z-index:10001;color-scheme:light;' +
-      'box-shadow:0 6px 18px rgba(0,0,0,.18);font-size:12.5px;color:#203170}' +
+    // 米饭盆的全屏覆盖层：铺满窗口、完全不吃事件，z-index 在挂件之上、菜单之下
+    '#dshpet-rice{position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;' +
+      'z-index:9999;-webkit-user-drag:none}' +
+    '#dshpet-menu{position:fixed;display:none;min-width:184px;box-sizing:border-box;' +
+      'background:var(--m-bg);border:1px solid var(--m-border);border-radius:10px;padding:5px;' +
+      'z-index:10001;box-shadow:0 6px 18px rgba(0,0,0,.18);font-size:12.5px;color:var(--m-ink);' +
+      // 浅色（默认）：取自上游 PetColors 的 light 一套
+      '--m-bg:rgba(248,249,250,.97);--m-ink:#0f1115;--m-head:#81858c;--m-hover:#e9ecf2;' +
+      '--m-border:rgba(32,49,112,.30);--m-sep:#ebeef2;--m-accent:#4176e6;color-scheme:light}' +
+    // 深色：DSH 界面风（上游 PetColors 的 dark 一套）
+    '#dshpet-menu.is-dark{--m-bg:rgba(44,44,46,.97);--m-ink:#f9fafb;--m-head:#adb2b8;' +
+      '--m-hover:#3a3d42;--m-border:#42444a;--m-sep:#36373a;--m-accent:#7aaaff;color-scheme:dark;' +
+      'box-shadow:0 6px 18px rgba(0,0,0,.5)}' +
     '.dshpet-mi{padding:6px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}' +
-    '.dshpet-mi:hover{background:rgba(32,49,112,.10)}' +
+    '.dshpet-mi:hover{background:var(--m-hover)}' +
+    '.dshpet-msep{height:1px;background:var(--m-sep);margin:4px 8px}' +
+    '.dshpet-mhead{padding:5px 10px 2px;color:var(--m-head);font-size:11px;cursor:default;white-space:nowrap}' +
     // 喜报气泡：挂在角色上方，白描边保证在浅色主题下也读得清
     '#dshpet-turn{position:absolute;left:50%;bottom:100%;transform:translateX(-50%);margin-bottom:6px;' +
       'pointer-events:none;text-align:center;white-space:nowrap;display:none;opacity:0;' +
@@ -1860,6 +2656,16 @@ function injectCss() {
     '.dshpet-about-reflink{margin-top:2px;word-break:break-all}' +
     '.dshpet-about-refnote{margin-top:2px;color:#6b7ba8;line-height:1.5}' +
     '.dshpet-about-actions{display:flex;justify-content:flex-end;margin-top:14px}' +
+    // 通用输入弹层（自定义尺寸 / 音量）
+    '#dshpet-prompt{position:fixed;inset:0;z-index:31500;background:rgba(0,0,0,.6);display:flex;' +
+      'align-items:center;justify-content:center}' +
+    '.dshpet-prompt-label{margin:2px 0 10px;color:#6b7ba8;line-height:1.5}' +
+    '.dshpet-prompt-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}' +
+    '.dshpet-prompt-inp{flex:1;min-width:0;box-sizing:border-box;padding:7px 10px;border-radius:7px;' +
+      'border:1px solid rgba(32,49,112,.28);background:#fff;color:#203170;font-size:13px;' +
+      'font-family:ui-monospace,Consolas,monospace}' +
+    '.dshpet-prompt-inp:focus{outline:none;border-color:#4176e6;box-shadow:0 0 0 2px rgba(65,118,230,.18)}' +
+    '.dshpet-prompt-suf{color:#6b7ba8;font-weight:700}' +
     // 许可证阅读弹层（应用内显示，不依赖浏览器打开）
     '#dshpet-license{position:fixed;inset:0;z-index:31400;background:rgba(0,0,0,.6);display:flex;' +
       'align-items:center;justify-content:center}' +
@@ -1902,6 +2708,14 @@ function buildDom() {
   menuEl.root.id = 'dshpet-menu'
   ;(document.body || document.documentElement).appendChild(menuEl.root)
 
+  // 米饭盆玩法的全屏覆盖层。盆要能落在**整个窗口底部的任意位置**，所以不能画在
+  // 挂件那块小画布里。pointer-events:none —— 它绝不吃 DSH 界面的任何事件，
+  // 命中判定由 document 上的 pointerdown 自己做（见 onPointerDown）。
+  riceEl = document.createElement('canvas')
+  riceEl.id = 'dshpet-rice'
+  ;(document.body || document.documentElement).appendChild(riceEl)
+  riceCtx = riceEl.getContext('2d')
+
   ctx = canvas.getContext('2d')
   layout()
   place()
@@ -1923,7 +2737,11 @@ function refreshAssets() {
     return loadImage(f, PREFIX + '/sprite/' + f).then(function (img) {
       if (img) return buildMask(f, img)
     })
-  })).then(function () { draw() })
+  })).then(function () {
+    // 掩码刚建好，顺便量出头顶锚点（铁锅扣头用）
+    computeHeadAnchor()
+    draw()
+  })
 }
 
 function start() {
@@ -1960,7 +2778,8 @@ function start() {
 
       layout()
       place()
-      return refreshAssets()
+      // 立绘 / 表情 / 充值玩法的素材一起加载
+      return Promise.all([refreshAssets(), loadExpressionArt(), loadTopupArt()])
     })
     .then(function () {
       draw()

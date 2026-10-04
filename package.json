@@ -1,7 +1,7 @@
 {
   "name": "dsh-balance-pet-extend",
-  "version": "1.5.0",
-  "description": "DSH Balance Pet Enhanced —— 把 macOS 原生桌宠（大肥鱼 / GPT龙娘 / 大小姐Claude / 北美猫娘Gemini）改写为 DSH Web 插件。余额显示在角色手持的平板里，来源覆盖所有「用 API key 就能自动查到」的厂商（金额 + 订阅额度，只列已配凭据的）；每轮结束弹「喜报」显示本轮消耗；累计计费可结算为「喜报」全屏证书；节假日清单可导入并自动提示过期；右键菜单含「网络自检」与「关于」。",
+  "version": "1.6.0",
+  "description": "DSH Balance Pet Enhanced —— 把 macOS 原生桌宠（大肥鱼 / GPT龙娘 / 大小姐Claude / 北美猫娘Gemini / 白月光Kimi）改写为 DSH Web 插件。余额显示在角色手持的平板里，来源覆盖所有「用 API key 就能自动查到」的厂商（金额 + 订阅额度，只列已配凭据的）；每轮结束弹「喜报」显示本轮消耗；累计计费可结算为「喜报」全屏证书；节假日清单可导入并自动提示过期；另有表情系统、米饭盆充值玩法与火控雷达；右键菜单含「网络自检」与「关于」。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -13,6 +13,9 @@
   "author": "TsukiKenga (https://github.com/TsukiKenga)",
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
   "files": [
     "lib",
     "assets",

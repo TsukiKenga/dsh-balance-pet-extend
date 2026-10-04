@@ -61,11 +61,30 @@ VK-1
       来源     VK-1 的 macOS 移植版 Resources/ 目录
       权利状态 见上：上游未附许可
 
+  assets/sprites/kimi.png          （白月光Kimi）
+      来源     来源不明，由本仓库维护者自行提供
+      权利状态 未附来源说明；公开发布前请自行确认
+
   assets/certificate.png
       来源     「喜报」庆祝模板底图
       权利状态 来源不明，按 as-is 使用；发布前请自行确认
 
+  assets/expr/expression_11.png   开口笑（常态）
+  assets/expr/expression_22.png   闭眼皱眉（扣费中）
+  assets/expr/expression_12.png   鼓嘴（盆没接住）
+  assets/expr/expression_21.png   面无表情（铁锅扣在头上）
+      来源     VK-1 v2「大肥鱼桌宠改」的 sprites/ 目录，逐字节复制
+      权利状态 同 VK-1：上游未附许可
+
+  assets/rice.png        米饭盆（充值玩法掉落物）
+  assets/iron_bowl.png   铁锅，2880x2880（会扣到角色头上）
+      来源     VK-1 v2 根目录，逐字节复制
+      权利状态 同 VK-1：上游未附许可
+
   原始的逐文件 SHA-256 记录在 dsh-balance-pet-macos/Resources/README.md。
+
+  注：以上 VK-1 v2 的素材（四张表情 + 米饭盆 + 铁锅）都来自同一个上游项目，
+      许可状态与前面的 VK-1 立绘完全一致 —— 都没有可再分发的授权依据。
 
 
 ==========================================================================
@@ -75,6 +94,10 @@ VK-1
   assets/hit.mp3
       来源     原版桌宠音效（Windows 版逐字节复制）
       权利状态 随上游素材，按 as-is
+
+  assets/feed.mp3
+      来源     VK-1 v2（投喂米饭盆的提示音），逐字节复制
+      权利状态 同 VK-1：上游未附许可
 
   assets/congrats-turn.mp3
       来源     vjshi 音效库
@@ -100,8 +123,12 @@ VK-1
 
   需先确认或替换
       assets/sprites/*.png                   VK-1 立绘，上游无许可
+      assets/sprites/kimi.png                来源不明
+      assets/expr/*.png                      VK-1 v2 表情立绘，同上
+      assets/rice.png / assets/iron_bowl.png VK-1 v2 玩法素材，同上
       assets/certificate.png                 来源不明
 
   不可再分发
       assets/congrats-turn.mp3               vjshi 商业素材
+      assets/feed.mp3                        随 VK-1，上游未附许可
       assets/congrats-settle.mp3             电影配乐，建议打包时排除
