@@ -20,11 +20,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
---------------------------------------------------------------------------
+======
 
-说明
-
-本 MIT 许可仅覆盖本仓库的代码，即 lib/ 目录下的文件与 assets/pet.js。
-
-assets/ 目录下的美术与音频素材不在本许可覆盖范围内，其来源与权利状态逐项
-记录在随包分发的 THIRD-PARTY-NOTICES.txt 中。再分发前请先阅读该文件。
+注意：本Licence涵盖的范围不覆盖/assets下的任何文件
