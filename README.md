@@ -1,4 +1,5 @@
 # DSH余额桌宠 · DSH Balance Pet Enhanced
+>「本项目基于 [VKmich16/VK-1](https://www.github.com/VKmich16/VK-1) 二次开发
 
 贴在 **DSH** 页面里的余额桌宠：角色举着一块倾斜的平板，实时显示你的余额。
 
