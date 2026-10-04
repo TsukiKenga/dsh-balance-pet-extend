@@ -176,8 +176,10 @@ function makeEnv() {
       author: { role: '分支维护者', name: 'TsukiKenga', url: 'https://github.com/TsukiKenga' },
       selfLicense: { label: 'MIT', url: '/dsh-pet/license.txt?f=LICENSE.txt' },
       notices: { label: '第三方来源与许可', url: '/dsh-pet/license.txt?f=THIRD-PARTY-NOTICES.txt' },
+      refsTitle: '参考的开源项目（本插件基于其 Mac 分支改写）',
       references: [
-        { name: 'VK-1', url: 'https://github.com/VKmich16/VK-1', by: 'VKmich', note: '原型', licenseLabel: '上游暂未附许可证', licenseUrl: null },
+        { name: 'VK-1', url: 'https://github.com/VKmich16/VK-1', by: 'VKmich', note: '最初的原作者（Windows 版桌宠）—— 表情系统、米饭盆充值玩法、铁锅扣头与火控雷达移植自这一版的「大肥鱼桌宠改」。', licenseLabel: '上游暂未附许可证', licenseUrl: null },
+        { name: 'DSH-DaFeiYu-Desktop-Pet', url: 'https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet', by: 'Andromedahk', note: 'fork 自 VK-1，Mac 版桌宠（Swift + AppKit），后被上游合并 —— 本插件基于这一版改写：四个角色、立绘、平板布局、扣费动画与「抱盆」离线态都来自这里。', licenseLabel: '上游暂未附许可证', licenseUrl: null },
         { name: 'DeepSeek-Balance-Whale-Widget', url: 'https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget', by: 'MeteorNOX', license: 'MIT', note: '参考', licenseLabel: 'MIT 许可证原文', licenseUrl: '/dsh-pet/license.txt?f=whale-LICENSE.txt', provenanceUrl: '/dsh-pet/license.txt?f=whale-PROVENANCE.txt' },
       ],
     },
@@ -595,6 +597,48 @@ await openMenu()
 click(rowBy(menuRoot, '打开火控雷达'))   // 关掉，避免影响后续
 await flush(6)
 ok('开关火控雷达不报错', runtimeErrors.length === 0, runtimeErrors.slice(0, 2).join(' | '))
+
+console.log('')
+console.log('=== 关于（含上游版本说明）===')
+await openMenu()
+const aboutRow = rowBy(menuRoot, '关于')
+ok('菜单有「关于…」', !!aboutRow, rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+if (aboutRow) { click(aboutRow); await flush(8) }
+const aboutEl = doc.body.children.filter((c) => c.id === 'dshpet-about')[0]
+ok('关于对话框已打开', !!aboutEl)
+const aboutBox = aboutEl && aboutEl.children[0]
+const aboutText = aboutBox ? aboutBox.textContent : ''
+ok('显示正式名 DSH Balance Pet Enhanced', aboutText.includes('DSH Balance Pet Enhanced'), aboutText.slice(0, 90))
+ok('显示分支维护者', aboutText.includes('分支维护者') && aboutText.includes('TsukiKenga'))
+ok('显示包名', aboutText.includes('dsh-balance-pet-extend'))
+ok('显示本分支 GitHub 地址', aboutText.includes('github.com/TsukiKenga/dsh-balance-pet-extend'))
+// 两个上游都要在，且关系必须写对：VKmich 是最初的原作者，Andromedahk 是 fork
+ok('列出 Mac 分支上游（Andromedahk）', aboutText.includes('Andromedahk') && aboutText.includes('DSH-DaFeiYu-Desktop-Pet'))
+ok('列出最初的原作者（VKmich）', aboutText.includes('VKmich') && aboutText.includes('VK-1'))
+ok('写明 VKmich 是「最初的原作者」', /最初的原作者/.test(aboutText))
+ok('写明 Andromedahk 是 fork 自 VK-1', /fork 自 VK-1/.test(aboutText))
+ok('说明本插件基于该 Mac 分支改写', aboutText.includes('基于其 Mac 分支') || aboutText.includes('基于这一版改写'), aboutText.slice(-280))
+ok('注明 Andromedahk 那支是 Mac 版', /Mac 版桌宠/.test(aboutText))
+ok('注明 VKmich 那支是 Windows 版', /Windows 版桌宠/.test(aboutText))
+// VK-1 必须排在 Andromedahk 之前（原作者在前）
+ok('VK-1 排在 Andromedahk 之前', aboutText.indexOf('VKmich') < aboutText.indexOf('Andromedahk'),
+  'VK-1@' + aboutText.indexOf('VKmich') + '  Andromedahk@' + aboutText.indexOf('Andromedahk'))
+ok('保留 whale 参考项目', aboutText.includes('DeepSeek-Balance-Whale-Widget') && aboutText.includes('MeteorNOX'))
+// 链接可点：本分支仓库 + 作者 + 两个上游 + whale = 5 个 https 外链
+const aboutLinks = []
+;(function collect(el) {
+  for (const c of (el.children || [])) { if (c.tagName === 'a') aboutLinks.push(c); collect(c) }
+})(aboutBox)
+const httpsLinks = aboutLinks.filter((a) => /^https:/.test(String(a.href || '')))
+ok('五个 GitHub 外链都可点（仓库+作者+三参考）', httpsLinks.length === 5, httpsLinks.map((l) => l.href).join(' | '))
+ok('Andromedahk 链接正确', httpsLinks.some((l) => l.href === 'https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet'))
+ok('VKmich 链接正确', httpsLinks.some((l) => l.href === 'https://github.com/VKmich16/VK-1'))
+ok('whale 链接正确', httpsLinks.some((l) => l.href === 'https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget'))
+ok('外链均为新窗口打开', httpsLinks.length > 0 && httpsLinks.every((l) => l.target === '_blank'))
+// 关掉，避免影响后续
+const aboutClose = aboutBox && aboutBox.children.filter((c) => String(c.className).indexOf('dshpet-about-actions') >= 0)[0]
+if (aboutClose) { click(aboutClose.children[0]); await flush(4) }
+ok('关于对话框可关闭', !doc.body.children.some((c) => c.id === 'dshpet-about'))
 
 console.log('')
 console.log('运行期错误: ' + (runtimeErrors.length ? runtimeErrors.slice(0, 3).join(' | ') : '（无）'))

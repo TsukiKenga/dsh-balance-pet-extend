@@ -31,21 +31,37 @@ DeepSeek-Balance-Whale-Widget
         发布，不要删除。
 
 --------------------------------------------------------------------------
-VK-1
+VK-1                                        ← 最初的原作者
 --------------------------------------------------------------------------
   仓库      https://github.com/VKmich16/VK-1
   作者      VKmich
   许可      上游暂未附许可证
 
+  本插件的用途：表情系统、米饭盆充值玩法、铁锅扣头与火控雷达，移植自这一版里的
+  「大肥鱼桌宠改」（Windows / PowerShell 版，目录 大肥鱼桌宠改_D-16BVM）。
+
+--------------------------------------------------------------------------
+DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
+--------------------------------------------------------------------------
+  仓库      https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet
+  作者      Andromedahk
+  许可      上游暂未附许可证
+
+  与 VK-1 的关系：fork 自 https://github.com/VKmich16/VK-1，做的是 macOS 原生版
+  （Swift + AppKit），后来被上游合并（VK-1 的 PR #1）。
+
+  本插件的用途：本插件就是基于这一版改写的 —— 四个角色、立绘、平板布局、
+  扣费动画与「抱盆」离线态都来自这里。assets/sprites/ 下的角色立绘即出自该版。
+
   ⚠ 重要 —— 打包发布前必须留意
 
-  上游项目 VK-1 及其 macOS 移植版 dsh-balance-pet-macos 的素材说明里明确写着：
+  上游素材说明里明确写着：
 
     「上游原作者说明 UI 图片由其处理；上游暂未附许可证。这里保留来源说明，
       不另行授予上游代码、素材或衍生图片的许可。」
 
-  也就是说：assets/sprites/ 下的四个角色立绘源自 VK-1，没有可再分发的许可
-  依据。本插件按 as-is 随包提供、仅供本地运行。如果要公开发布这个插件，
+  也就是说：assets/sprites/ 下的角色立绘源自 VK-1 及其 Mac 分支，没有可再分发
+  的许可依据。本插件按 as-is 随包提供、仅供本地运行。如果要公开发布这个插件，
   建议先向 VK-1 作者确认授权，或替换成你自己拥有权利的立绘。
 
 
@@ -58,7 +74,7 @@ VK-1
   assets/sprites/gpt.png
   assets/sprites/claude.png
   assets/sprites/gemini.png
-      来源     VK-1 的 macOS 移植版 Resources/ 目录
+      来源     Mac 分支 DSH-DaFeiYu-Desktop-Pet（fork 自 VK-1）的 Resources/ 目录
       权利状态 见上：上游未附许可
 
   assets/sprites/kimi.png          （白月光Kimi）
@@ -132,3 +148,5 @@ VK-1
       assets/congrats-turn.mp3               vjshi 商业素材
       assets/feed.mp3                        随 VK-1，上游未附许可
       assets/congrats-settle.mp3             电影配乐，建议打包时排除
+==========================================================================
+该文件由DeepSeek V4.1 Flash构建

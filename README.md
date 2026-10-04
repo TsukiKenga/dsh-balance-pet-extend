@@ -2,9 +2,10 @@
 
 > 正式名称 **DSH Balance Pet Enhanced**；安装 / 发布的包名是 **`dsh-balance-pet-extend`**（两者不同，别混）。
 
-把 macOS 原生桌宠 **DSH大肥鱼桌宠**（VK-1 的 macOS 移植版，Swift + AppKit）
-改写成的 **DSH Web 插件**。四个角色，余额显示在角色手持的倾斜平板里，每扣 ¥0.01
-红闪 + 震动 + 音效 + 飘字，充值有绿色光环。
+把 macOS 原生桌宠 **DSH大肥鱼桌宠**（[VK-1](https://github.com/VKmich16/VK-1) 的 Mac 分支
+[DSH-DaFeiYu-Desktop-Pet](https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet)，
+Swift + AppKit）改写成的 **DSH Web 插件**。五个角色，余额显示在角色手持的倾斜平板里，
+每扣 ¥0.01 红闪 + 震动 + 音效 + 飘字，充值有绿色光环。
 
 与 `dsh-whale-widget` **互不依赖，可以共存**：鲸鱼挂件固定在右下角，本桌宠默认吸附
 **左下角**（与 macOS 原版一致），两者不会互相遮挡。
@@ -429,9 +430,14 @@ node test/smoke.mjs      # 或 npm test
 - **分支维护者**：[TsukiKenga](https://github.com/TsukiKenga)
   （本仓库是上游桌宠的分支延续，所以署名口径是「分支维护者」而非原作者）
 - **许可**：`MIT` + [第三方来源与许可](THIRD-PARTY-NOTICES.txt) —— 都是**可直接点开阅读的链接**
-- **参考的开源项目**（GitHub 地址在对话框里可点）：
-  - [VK-1](https://github.com/VKmich16/VK-1)　By VKmich —— 本桌宠立绘与动画的原型
+- **参考的开源项目**（标题里直接写明本插件基于哪个分支改写；GitHub 地址在对话框里可点）：
+  - [VK-1](https://github.com/VKmich16/VK-1)　By VKmich —— **最初的原作者**（Windows 版桌宠）
+    表情系统、米饭盆充值玩法、铁锅扣头与火控雷达移植自这一版的「大肥鱼桌宠改」
     （许可证：**上游暂未附许可证**，对话框里如实写出）
+  - [DSH-DaFeiYu-Desktop-Pet](https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet)　By Andromedahk
+    —— **fork 自 VK-1** 的 Mac 分支（Swift + AppKit），后被上游合并；
+    **本插件基于这一版改写**：四个角色、立绘、平板布局、扣费动画与「抱盆」离线态都来自这里
+    （许可证：**上游暂未附许可证**）
   - [DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)　By MeteorNOX　MIT
     —— 计价口径与厂商模板参考，**许可证原文与素材来源说明都随包分发、点开即读**
 
@@ -492,8 +498,10 @@ node test/smoke.mjs      # 或 npm test
 
 ## 素材与许可
 
-`assets/sprites/*.png`、`assets/hit.mp3` 来自 VK-1 的 macOS 移植版 `Resources/`，
-**逐字节复制**（原版 `Resources/README.md` 记录了各自的 SHA-256）。
+`assets/sprites/*.png`、`assets/hit.mp3` 来自 Mac 分支
+[DSH-DaFeiYu-Desktop-Pet](https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet)
+（fork 自 [VK-1](https://github.com/VKmich16/VK-1)）的 `Resources/`，**逐字节复制**
+（原版 `Resources/README.md` 记录了各自的 SHA-256）。
 
 新增素材同样逐字节复制进包：
 

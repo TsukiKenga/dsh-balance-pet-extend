@@ -1,7 +1,7 @@
 // ============================================================================
 // dsh-balance-pet-extend —— 浏览器半区（桌宠绘制 / 动画 / 交互）
 // ============================================================================
-// 改写自 macOS 原生版桌宠（VK-1 的 macOS 移植版，Swift + AppKit）。
+// 改写自 macOS 原生版桌宠（DSH-DaFeiYu-Desktop-Pet，fork 自 VK-1，Swift + AppKit）。
 // 原版没有任何序列帧：每个角色就是**一张静态 1536×1024 PNG**，所有动画都是
 // 过程式的（震动 / 红闪 / 飘字 / 充值光环）。所以这里用 <canvas> 逐帧重绘，
 // 而不是 CSS 动画 —— 原版是把震动施加在**整个上下文**上的，精灵和文字一起抖，
@@ -2213,7 +2213,8 @@ function showAbout() {
   if (refs.length) {
     var sep = document.createElement('div')
     sep.className = 'dshpet-about-sep'
-    sep.textContent = '参考的开源项目'
+    // 标题由宿主下发 —— 里面写明了本插件基于哪个版本改写
+    sep.textContent = info.refsTitle || '参考的开源项目'
     box.appendChild(sep)
     for (var r = 0; r < refs.length; r++) {
       var ref = refs[r]
