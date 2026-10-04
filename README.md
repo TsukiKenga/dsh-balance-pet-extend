@@ -5,8 +5,6 @@
 余额每**下降 0.01 元**，她红闪 + 震动 + 播放打击音效，头顶飘出 `-0.01`，0.2 秒一次串成一条；
 余额**上升（充值）**时，掉下一盆米饭，把它**拖到角色身上**才一次性入账。
 
-安装 / 发布的包名是 **`dsh-balance-pet-extend`**，正式名称是 **DSH Balance Pet Enhanced** —— 两者不同，别混。
-
 | | |
 | --- | --- |
 | **当前版本** | **v1.7.0** |
@@ -210,14 +208,13 @@ node test/smoke.mjs
 
 更早的改动散落在[详细版说明](docs/README.full.md)里，不再逐条列出。
 
-## 🙏 贡献者
+## 🙏 只写
 
 | 部分 | 作者 | 说明 |
 | --- | --- | --- |
 | **上游原作者** | [@VKmich16](https://github.com/VKmich16) | [VK-1](https://github.com/VKmich16/VK-1) —— Windows 版桌宠。表情系统、米饭盆玩法、铁锅与火控雷达的原型 |
 | **Mac 分支** | [@Andromedahk](https://github.com/Andromedahk) | [DSH-DaFeiYu-Desktop-Pet](https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet) —— **fork 自 VK-1**，Swift + AppKit，后被上游合并。**本插件基于这一版改写** |
 | **计价与厂商模板** | [@MeteorNOX](https://github.com/MeteorNOX) | [DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)（MIT）—— 峰谷计价口径与各家接口字段路径 |
-| **本插件** | [@TsukiKenga](https://github.com/TsukiKenga) | 分支维护者 |
 
 ## ⚖️ 许可
 
