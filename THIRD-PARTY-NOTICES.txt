@@ -35,34 +35,52 @@ VK-1                                        ← 最初的原作者
 --------------------------------------------------------------------------
   仓库      https://github.com/VKmich16/VK-1
   作者      VKmich
-  许可      上游暂未附许可证
+  许可      MIT（Copyright (c) 2026 VKmich16）
+  许可原文  licenses/VK-1-LICENSE.txt
+            （逐字节复制自上游 LICENSE，SHA-256 已核对）
+
+  上游 LICENSE 明确覆盖：
+
+    程序代码  各版本目录下的 .ps1 / .vbs / .cmd
+    角色美术  大肥鱼桌宠改_D-16BVM/ 下的 sprite.png、sprites/*.png、
+              rice.png、iron_bowl.png
+    音效      hit.mp3、feed.mp3
 
   本插件的用途：表情系统、米饭盆充值玩法、铁锅扣头与火控雷达，移植自这一版里的
   「大肥鱼桌宠改」（Windows / PowerShell 版，目录 大肥鱼桌宠改_D-16BVM）。
+  该目录下的米饭盆、铁锅与音效素材按 MIT 使用，随包分发合法。
+
+  注意  MIT 要求再分发时保留版权与许可声明，因此 licenses/VK-1-LICENSE.txt
+        必须随包一起发布，不要删除。
 
 --------------------------------------------------------------------------
 DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
 --------------------------------------------------------------------------
   仓库      https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet
   作者      Andromedahk
-  许可      上游暂未附许可证
+  许可      上游未另行授予许可
+            （VK-1 的 MIT 不覆盖此目录，VK-1 README 写明「许可以其独立说明为准」）
 
   与 VK-1 的关系：fork 自 https://github.com/VKmich16/VK-1，做的是 macOS 原生版
   （Swift + AppKit），后来被上游合并（VK-1 的 PR #1）。
 
   本插件的用途：本插件就是基于这一版改写的 —— 四个角色、立绘、平板布局、
-  扣费动画与「抱盆」离线态都来自这里。assets/sprites/ 下的角色立绘即出自该版。
+  扣费动画与「抱盆」离线态都来自这里。assets/sprites/ 下的 5 张立绘
+  （fish / fish-offline / gpt / claude / gemini）与这一版逐字节相同。
 
   ⚠ 重要 —— 打包发布前必须留意
 
-  上游素材说明里明确写着：
+  该仓库的 Resources/README.md 明确写着：
 
     「上游原作者说明 UI 图片由其处理；上游暂未附许可证。这里保留来源说明，
       不另行授予上游代码、素材或衍生图片的许可。」
 
-  也就是说：assets/sprites/ 下的角色立绘源自 VK-1 及其 Mac 分支，没有可再分发
-  的许可依据。本插件按 as-is 随包提供、仅供本地运行。如果要公开发布这个插件，
-  建议先向 VK-1 作者确认授权，或替换成你自己拥有权利的立绘。
+  而且它的四张角色立绘是在 Windows 原图（1024x1024）基础上 AI 补全出来的
+  1536x1024 版本，该说明也写明「含轻微生成重绘，不能视作原图逐像素不变的扩边」。
+
+  也就是说：assets/sprites/ 下的 5 张立绘没有明确的可再分发依据。本插件按 as-is
+  随包提供、仅供本地运行。如果要公开发布这个插件，建议先向 Andromedahk 与
+  VKmich 确认授权，或替换成你自己拥有权利的立绘。
 
 
 ==========================================================================
@@ -75,11 +93,11 @@ DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
   assets/sprites/claude.png
   assets/sprites/gemini.png
       来源     Mac 分支 DSH-DaFeiYu-Desktop-Pet（fork 自 VK-1）的 Resources/ 目录
-      权利状态 见上：上游未附许可
+      权利状态 ⚠ 该分支未另行授予许可 —— 见上
 
   assets/sprites/kimi.png          （白月光Kimi）
-      来源     来源不明，由本仓库维护者自行提供
-      权利状态 未附来源说明；公开发布前请自行确认
+      来源     由本仓库维护者提供
+      权利状态 本仓库维护者自有
 
   assets/certificate.png
       来源     「喜报」庆祝模板底图
@@ -89,18 +107,20 @@ DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
   assets/expr/expression_22.png   闭眼皱眉（扣费中）
   assets/expr/expression_12.png   鼓嘴（盆没接住）
   assets/expr/expression_21.png   面无表情（铁锅扣在头上）
-      来源     VK-1 v2「大肥鱼桌宠改」的 sprites/ 目录，逐字节复制
-      权利状态 同 VK-1：上游未附许可
+      来源     原图来自 VK-1 v2「大肥鱼桌宠改」的 sprites/ 目录；
+               现用版本由本仓库维护者重绘为 1536x1024
+      权利状态 MIT（VK-1）/ 维护者自有 —— 可随包分发
 
   assets/rice.png        米饭盆（充值玩法掉落物）
   assets/iron_bowl.png   铁锅，2880x2880（会扣到角色头上）
-      来源     VK-1 v2 根目录，逐字节复制
-      权利状态 同 VK-1：上游未附许可
+      来源     VK-1 v2「大肥鱼桌宠改_D-16BVM」根目录，逐字节复制
+      权利状态 MIT（VK-1 LICENSE 明确覆盖）—— 可随包分发
 
   原始的逐文件 SHA-256 记录在 dsh-balance-pet-macos/Resources/README.md。
 
-  注：以上 VK-1 v2 的素材（四张表情 + 米饭盆 + 铁锅）都来自同一个上游项目，
-      许可状态与前面的 VK-1 立绘完全一致 —— 都没有可再分发的授权依据。
+  注：以上 VK-1 v2 的素材（四张表情 + 米饭盆 + 铁锅）都来自同一个上游项目。
+      表情与玩法素材（expr / rice / iron_bowl）在 VK-1 LICENSE 的覆盖范围内，是 MIT；
+      但四张**角色立绘**来自 Mac 分支，那一支未另行授予许可 —— 两者不要混为一谈。
 
 
 ==========================================================================
@@ -109,11 +129,11 @@ DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
 
   assets/hit.mp3
       来源     原版桌宠音效（Windows 版逐字节复制）
-      权利状态 随上游素材，按 as-is
+      权利状态 MIT（VK-1 LICENSE 明确覆盖 hit.mp3）—— 可随包分发
 
   assets/feed.mp3
-      来源     VK-1 v2（投喂米饭盆的提示音），逐字节复制
-      权利状态 同 VK-1：上游未附许可
+      来源     VK-1 v2「大肥鱼桌宠改_D-16BVM」（投喂米饭盆的提示音），逐字节复制
+      权利状态 MIT（VK-1 LICENSE 明确覆盖 feed.mp3）—— 可随包分发
 
   assets/congrats-turn.mp3
       来源     vjshi 音效库
@@ -133,20 +153,19 @@ DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
 4. 小结：哪些能随包公开发布
 ==========================================================================
 
-  可以
-      lib/ 下的文件、assets/pet.js           本插件代码，MIT
-      whale 的 LICENSE / PROVENANCE 文本     MIT，而且必须一起带
+  可以（已明确授权）
+      lib/ 下的文件、assets/pet.js            本插件代码，MIT
+      licenses/VK-1-LICENSE.txt               VK-1 的 MIT 原文，必须一起带
+      licenses/DeepSeek-Balance-Whale-*       MIT，而且必须一起带
+      assets/expr/*.png                       原图来自 VK-1（MIT），现版为维护者重绘
+      assets/rice.png / assets/iron_bowl.png  VK-1 LICENSE 明确覆盖，MIT
+      assets/hit.mp3 / assets/feed.mp3        VK-1 LICENSE 明确覆盖，MIT
+      assets/sprites/kimi.png                 维护者自有
 
   需先确认或替换
-      assets/sprites/*.png                   VK-1 立绘，上游无许可
-      assets/sprites/kimi.png                来源不明
-      assets/expr/*.png                      VK-1 v2 表情立绘，同上
-      assets/rice.png / assets/iron_bowl.png VK-1 v2 玩法素材，同上
-      assets/certificate.png                 来源不明
+      assets/sprites/*.png（5 张角色立绘）     Mac 分支未另行授予许可
+      assets/certificate.png                  来源不明
 
   不可再分发
-      assets/congrats-turn.mp3               vjshi 商业素材
-      assets/feed.mp3                        随 VK-1，上游未附许可
-      assets/congrats-settle.mp3             电影配乐，建议打包时排除
-==========================================================================
-该文件由DeepSeek V4.1 Flash构建
+      assets/congrats-turn.mp3                vjshi 商业素材
+      assets/congrats-settle.mp3              电影配乐，建议打包时排除

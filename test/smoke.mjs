@@ -93,6 +93,15 @@ function makeCtx(record = true) {
         }
       }
       if (k === 'measureText') return () => ({ width: 40 })
+      // 雷达名牌是纯 fillText + arc 画出来的，只能靠这两个记录来断言
+      if (k === 'fillText') {
+        if (!record) return () => {}
+        return (text, x, y) => { TEXTS.push({ text: String(text), x: x, y: y }) }
+      }
+      if (k === 'arc') {
+        if (!record) return () => {}
+        return (x, y, r) => { ARCS.push({ x: x, y: y, r: r }) }
+      }
       if (k === 'createLinearGradient' || k === 'createRadialGradient') return () => ({ addColorStop() {} })
       // 掩码：贴近真实立绘的分布 ——
       //   上方 20% 只有「头」（偏右，x 0.56..0.80）
@@ -129,6 +138,8 @@ const ALL_IMG = []      // 所有被请求的图片 src
 const DRAWS = []        // 每帧 drawImage 的参数（用来观察盆的位置）
 const AUDIO_PLAYED = []  // 实际被 play() 的音效源（观察音效）
 const LOGS = []         // 插件内部 console 输出（调试用）
+const TEXTS = []        // 被 fillText 画出的文字（雷达名牌读数）
+const ARCS = []         // 被 arc 画出的圆（雷达方向环）
 let vnow = 0            // 虚拟时钟（毫秒）
 function makeEnv() {
   const documentEl = new El('html')
@@ -178,8 +189,8 @@ function makeEnv() {
       notices: { label: '第三方来源与许可', url: '/dsh-pet/license.txt?f=THIRD-PARTY-NOTICES.txt' },
       refsTitle: '参考的开源项目（本插件基于其 Mac 分支改写）',
       references: [
-        { name: 'VK-1', url: 'https://github.com/VKmich16/VK-1', by: 'VKmich', note: '最初的原作者（Windows 版桌宠）—— 表情系统、米饭盆充值玩法、铁锅扣头与火控雷达移植自这一版的「大肥鱼桌宠改」。', licenseLabel: '上游暂未附许可证', licenseUrl: null },
-        { name: 'DSH-DaFeiYu-Desktop-Pet', url: 'https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet', by: 'Andromedahk', note: 'fork 自 VK-1，Mac 版桌宠（Swift + AppKit），后被上游合并 —— 本插件基于这一版改写：四个角色、立绘、平板布局、扣费动画与「抱盆」离线态都来自这里。', licenseLabel: '上游暂未附许可证', licenseUrl: null },
+        { name: 'VK-1', url: 'https://github.com/VKmich16/VK-1', by: 'VKmich', license: 'MIT', note: '最初的原作者（Windows 版桌宠）—— 表情系统、米饭盆充值玩法、铁锅扣头与火控雷达移植自这一版的「大肥鱼桌宠改」；米饭盆 / 铁锅 / 喂食与打击音效也取自该目录，均按 MIT 使用。', licenseLabel: 'MIT 许可证原文', licenseUrl: '/dsh-pet/license.txt?f=vk1-LICENSE.txt' },
+        { name: 'DSH-DaFeiYu-Desktop-Pet', url: 'https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet', by: 'Andromedahk', note: 'fork 自 VK-1，Mac 版桌宠（Swift + AppKit），后被上游合并 —— 本插件基于这一版改写：四个角色、立绘、平板布局、扣费动画与「抱盆」离线态都来自这里。', licenseLabel: '上游未另行授予许可', licenseUrl: null },
         { name: 'DeepSeek-Balance-Whale-Widget', url: 'https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget', by: 'MeteorNOX', license: 'MIT', note: '参考', licenseLabel: 'MIT 许可证原文', licenseUrl: '/dsh-pet/license.txt?f=whale-LICENSE.txt', provenanceUrl: '/dsh-pet/license.txt?f=whale-PROVENANCE.txt' },
       ],
     },
@@ -488,13 +499,69 @@ await flush(6)
 const fishRow = rowBy(menuRoot, '蓝色大肥鱼')
 if (fishRow) { click(fishRow); await flush(14) }
 
+
+// —— 三期测试用的小工具 ——
+// advance(0.001) 只跑 ceil(0.001/0.0167)=1 帧，用来「取一帧画面」精确计数
+async function oneFrame() { await advance(0.001) }
+
 function lastRiceCenter() {
   // 盆画在窗口级覆盖层上，用的是**视口坐标**，所以 drawImage 的中心就是点击点。
   const d = DRAWS.filter((x) => x.src.includes('rice.png')).slice(-1)[0]
   return d ? { x: d.x + d.w / 2, y: d.y + d.h / 2 } : null
 }
+// 一帧里画了几个盆（去重：同一个盆只会出现一次）
+function riceBowls() {
+  const out = []
+  for (const d of DRAWS) {
+    if (!d.src.includes('rice.png')) continue
+    const c = { x: d.x + d.w / 2, y: d.y + d.h / 2, r: d.w / 2 }
+    if (!out.some((o) => Math.abs(o.x - c.x) < 2 && Math.abs(o.y - c.y) < 2)) out.push(c)
+  }
+  return out
+}
+// 雷达名牌的文字（要和挂件平板上的余额文字区分开）
+function radarTexts() {
+  return TEXTS.filter((t) => t.text === '白饭' || /kpx/.test(t.text) ||
+    /px\/s/.test(t.text) || /^-?\d+ px$/.test(t.text))
+}
+// 立绘在**视口**里的矩形：画布绘制是局部坐标，加上容器 style.left/top 才是视口
+function petRect() {
+  const rootEl = doc.body.children.filter((c) => c.id === 'dshpet-root')[0]
+  const px = rootEl ? (parseFloat(rootEl.style.left) || 0) : 0
+  const py = rootEl ? (parseFloat(rootEl.style.top) || 0) : 0
+  const d = DRAWS.filter((x) => x.src.includes('/sprite/') || x.src.includes('/expr/')).slice(-1)[0]
+  return d ? { x: px + d.x, y: py + d.y, w: d.w, h: d.h } : null
+}
 function spawnOne() {
   return openMenu().then(() => { click(rowBy(menuRoot, '测试充值')) })
+}
+// 拖盆：pointerdown 落在 document（捕获阶段），pointermove/up 落在 window
+// （插件就是在 window 上挂的拖动监听，必须按真实链路派发）
+async function dragBowl(from, to, steps = 5) {
+  doc.fire('pointerdown', { button: 0, clientX: from.x, clientY: from.y })
+  await flush(2)
+  for (let i = 1; i <= steps; i++) {
+    win.fire('pointermove', {
+      clientX: from.x + (to.x - from.x) * i / steps,
+      clientY: from.y + (to.y - from.y) * i / steps,
+    })
+    await flush(2)
+  }
+  win.fire('pointerup', { clientX: to.x, clientY: to.y })
+  await flush(4)
+}
+// 把场上所有盆都拖给她吃掉，给后面的用例清场
+async function eatAllBowls() {
+  for (let guard = 0; guard < 24; guard++) {
+    DRAWS.length = 0
+    await oneFrame()
+    const list = riceBowls()
+    if (!list.length) break
+    const pr = petRect()
+    if (!pr) break
+    await dragBowl(list[list.length - 1], { x: pr.x + pr.w * 0.5, y: pr.y + pr.h * 0.62 })
+    await advance(0.7)
+  }
 }
 
 ok('存在窗口级覆盖层 #dshpet-rice', doc.body.children.some((c) => c.id === 'dshpet-rice'))
@@ -508,7 +575,7 @@ ok('掉下来一个米饭盆（有画 rice.png）', ys.length > 0, ys.length + '
 ok('盆在重力作用下下落（y 递增）', ys.length >= 2 && ys[ys.length - 1] > ys[0],
   ys.slice(0, 5).map((v) => Math.round(v)).join(' → '))
 
-// ② 落定在**窗口底部**（不再是挂件画布底部）
+// ② 落定在**窗口底部**
 await advance(3.0)
 DRAWS.length = 0
 await advance(0.4)
@@ -517,75 +584,150 @@ ok('落定后位置不再变化（停住）', ys2.length >= 2 && Math.abs(ys2[ys
   ys2.length ? (Math.round(ys2[0]) + ' → ' + Math.round(ys2[ys2.length - 1])) : '(无帧)')
 const settled = DRAWS.filter((d) => d.src.includes('rice.png')).slice(-1)[0]
 if (settled) {
-  const bottom = settled.y + settled.h
-  ok('盆落在整个窗口的底部（视口坐标）', Math.abs(bottom - win.innerHeight) <= 8,
-    '底边 y=' + Math.round(bottom) + '  窗口高=' + win.innerHeight)
+  ok('盆落在整个窗口的底部（视口坐标）', Math.abs(settled.y + settled.h - win.innerHeight) <= 8,
+    '底边 y=' + Math.round(settled.y + settled.h) + '  窗口高=' + win.innerHeight)
 } else {
   ok('盆落在整个窗口的底部（视口坐标）', false, '没记录到盆的绘制')
 }
 
-// ③ 落点铺满整个窗口宽度：连掉几次，横向范围要够宽（而不是挤在挂件那一小块里）
-const xs = []
-for (let i = 0; i < 6; i++) {
-  // 先把场上的盆清掉（投喂），再掉下一个
-  const c0 = lastRiceCenter()
-  if (c0) { doc.fire('pointerdown', { button: 0, clientX: c0.x, clientY: c0.y }); await flush(4) }
-  await advance(0.7)                  // 等它淡出
-  DRAWS.length = 0
-  await spawnOne()
-  await advance(0.1)
-  const d = DRAWS.filter((x) => x.src.includes('rice.png'))[0]
-  if (d) xs.push(d.x + d.w / 2)
-  await advance(0.2)
-}
-if (xs.length >= 3) {
-  const span = Math.max(...xs) - Math.min(...xs)
-  ok('落点散布在整个窗口宽度内（不局限于挂件）', span > win.innerWidth * 0.35,
-    'span=' + Math.round(span) + 'px  of ' + win.innerWidth + 'px   落点=' + xs.map((v) => Math.round(v)).join(','))
-  ok('落点都落在窗口内', xs.every((v) => v >= 0 && v <= win.innerWidth), xs.map((v) => Math.round(v)).join(','))
-} else {
-  ok('落点散布在整个窗口宽度内（不局限于挂件）', false, '只取到 ' + xs.length + ' 个落点')
-  ok('落点都落在窗口内', false, '样本不足')
-}
-
-// ④ 放着不管 → 10 秒后翻脸（ALOOF）
+// ③ 多盆并存 —— 上游：一笔充值一个盆，场上**可以同时有多个**
+await spawnOne(); await advance(0.5)
+await spawnOne(); await advance(0.5)
+await spawnOne(); await advance(3.0)     // 等它们都落地
 DRAWS.length = 0
-await advance(11.0)         // 超过上游 BowlWaitSec = 10s
-ok('盆放着不接，10 秒后切到冷淡表情（expression_12）', DRAWS.some((d) => d.src.includes('expression_12')),
-  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+await oneFrame()
+const multi = riceBowls()
+ok('多盆并存（一笔充值一个盆）', multi.length >= 4, '同一帧里有 ' + multi.length + ' 个盆')
 
-// ④ 点盆投喂（点中心）—— 也顺便清掉场上的盆
-const c = lastRiceCenter()
+// ④ 落点散布 + 盆间碰撞（不会叠成一堆）
+const mxs = multi.map((c) => c.x)
+ok('落点散布在整个窗口宽度内（不局限于挂件）',
+  mxs.length >= 2 && Math.max(...mxs) - Math.min(...mxs) > win.innerWidth * 0.3,
+  'span=' + Math.round(Math.max(...mxs) - Math.min(...mxs)) + 'px  of ' + win.innerWidth + 'px   落点=' +
+  mxs.map((v) => Math.round(v)).join(','))
+ok('落点都落在窗口内', mxs.every((v) => v >= 0 && v <= win.innerWidth))
+let overlapped = 0
+for (let i = 0; i < multi.length; i++) {
+  for (let j = i + 1; j < multi.length; j++) {
+    const dx = multi[i].x - multi[j].x, dy = multi[i].y - multi[j].y
+    const rr = (multi[i].r + multi[j].r) * 0.9   // 留一点余量
+    if (Math.sqrt(dx * dx + dy * dy) < rr) overlapped++
+  }
+}
+ok('盆彼此有碰撞体积（不叠成一堆）', overlapped === 0, overlapped + ' 对重叠')
+
+// 清场
+await eatAllBowls()
+
+// ⑤ 【核心】拖动喂食 —— 上游：必须把盆**拖到**她身上才入账
+await spawnOne()
+await advance(2.5)
+const toFeed = lastRiceCenter()
+const pr0 = petRect()
 AUDIO_PLAYED.length = 0
-if (c) {
-  doc.fire('pointerdown', { button: 0, clientX: c.x, clientY: c.y })
+if (toFeed && pr0) {
+  await dragBowl(toFeed, { x: pr0.x + pr0.w * 0.5, y: pr0.y + pr0.h * 0.62 })
   await flush(6)
 }
-ok('点盆会播放 feed.mp3', AUDIO_PLAYED.some((s) => s.includes('feed.mp3')), AUDIO_PLAYED.join(',') || '(无音效)')
+ok('把盆拖到她身上会投喂（播放 feed.mp3）',
+  AUDIO_PLAYED.some((s) => s.includes('feed.mp3')), AUDIO_PLAYED.join(',') || '(无音效)')
 
-// ⑤ 投喂后掉铁锅 → 平静表情
+// ⑥ 投喂后掉下铁锅，并扣在她头上
 DRAWS.length = 0
 await advance(3.5)
-const ironDrawn = DRAWS.some((d) => d.src.includes('iron_bowl.png'))
-ok('投喂后掉下铁锅（画了 iron_bowl.png）', ironDrawn, ironDrawn ? '有' : '无')
+ok('投喂后掉下铁锅（画了 iron_bowl.png）', DRAWS.some((d) => d.src.includes('iron_bowl.png')),
+  DRAWS.some((d) => d.src.includes('iron_bowl.png')) ? '有' : '无')
 ok('铁锅扣头时切到平静表情（expression_21）', DRAWS.some((d) => d.src.includes('expression_21')),
   [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
 
-// 【关键回归】锅要扣在**头上**，而不是精灵的水平正中。
-// 桩里掩码的「头」在 x 0.56..0.80（中心 0.68）；写死 0.5 会偏出 270px 左右。
-// 注意坐标空间：立绘画在**画布局部坐标**，盆画在**视口坐标**，两者差一个 state.x
-//（也就是容器元素的 style.left）。
+// 铁锅扣在**头**上（不是精灵的水平正中）
 const potDraw = DRAWS.filter((d) => d.src.includes('iron_bowl.png')).slice(-1)[0]
 const sprDraw = DRAWS.filter((d) => d.src.includes('/sprite/') || d.src.includes('/expr/')).slice(-1)[0]
-const rootEl = doc.body.children.filter((c) => c.id === 'dshpet-root')[0]
-const petX = rootEl ? (parseFloat(rootEl.style.left) || 0) : 0
+const rootEl2 = doc.body.children.filter((c) => c.id === 'dshpet-root')[0]
+const petX = rootEl2 ? (parseFloat(rootEl2.style.left) || 0) : 0
 if (potDraw && sprDraw) {
+  // 注意坐标空间：立绘是画布局部坐标，盆是视口坐标，差一个 state.x
   const frac = ((potDraw.x + potDraw.w / 2) - (petX + sprDraw.x)) / sprDraw.w
   ok('铁锅扣在头部锚点上（≈0.68，不再是 0.5）', frac > 0.62 && frac < 0.74,
-    '锅心占立绘宽度 ' + frac.toFixed(3) + '（头在 0.56~0.80，旧写死值 0.500）')
+    '锅心占立绘宽度 ' + frac.toFixed(3) + '（掩码里的头在 0.56~0.80）')
 } else {
   ok('铁锅扣在头部锚点上（≈0.68，不再是 0.5）', false, '缺绘制记录')
 }
+
+// ⑦ 双击她的头 → 把铁锅敲掉（上游是**双击**，不是单击）
+const pr1 = petRect()
+if (pr1) {
+  const hx = pr1.x + pr1.w * 0.68, hy = pr1.y + pr1.h * 0.06
+  // 真实双击 = down/up + down/up
+  for (let n = 0; n < 2; n++) {
+    doc.fire('pointerdown', { button: 0, clientX: hx, clientY: hy })
+    win.fire('pointerup', { clientX: hx, clientY: hy })
+  }
+  await flush(4)
+  await advance(1.5)     // 铁锅是渐隐消失的
+}
+DRAWS.length = 0
+await oneFrame()
+ok('双击她的头能敲掉铁锅', !DRAWS.some((d) => d.src.includes('iron_bowl.png')),
+  DRAWS.some((d) => d.src.includes('iron_bowl.png')) ? '铁锅还在' : '铁锅已消失')
+
+// ⑧ 火控雷达：落地满 BowlWaitSec(10s) → 锁定；再过 LockDelaySec(1s) → 加速吸附 → 自动喂
+await eatAllBowls()
+await advance(0.5)
+TEXTS.length = 0
+await spawnOne()
+await advance(2.0)                 // 已经落地（约 1 秒落到底）
+TEXTS.length = 0
+await oneFrame()
+ok('刚落地时还没有锁定（没有名牌）', radarTexts().length === 0, radarTexts().map((t) => t.text).join(' | '))
+
+// 一小步一小步地等，直到名牌出现（BowlWaitSec 10 秒，留足余量）
+let locked = false
+for (let i = 0; i < 140 && !locked; i++) {
+  TEXTS.length = 0
+  ARCS.length = 0
+  await advance(0.1)
+  if (radarTexts().some((t) => /kpx/.test(t.text))) locked = true
+}
+const lockedTexts = radarTexts().map((t) => t.text)
+ok('落地满 10 秒后出现火控雷达名牌（锁定）', locked, lockedTexts.join(' | ') || '(没出现)')
+ok('名牌含类型「白饭」', lockedTexts.some((t) => t === '白饭'), lockedTexts.join(' | '))
+ok('距离用 kpx（上游 FmtKpx）', lockedTexts.some((t) => /kpx/.test(t)), lockedTexts.join(' | '))
+ok('接近率用 px/s（上游 FmtPxS）', lockedTexts.some((t) => /px\/s/.test(t)), lockedTexts.join(' | '))
+ok('相对高度用 px（上游 FmtPx）', lockedTexts.some((t) => /^-?\d+ px$/.test(t)), lockedTexts.join(' | '))
+ok('画了方向环（arc）', ARCS.length > 0, ARCS.length + ' 个圆')
+
+// 锁定 1 秒 + 加速吸附 → 不用手拖，自动喂
+AUDIO_PLAYED.length = 0
+await advance(4.0)
+ok('锁定后会被吸过去并自动投喂（播放 feed.mp3）',
+  AUDIO_PLAYED.some((s) => s.includes('feed.mp3')), AUDIO_PLAYED.join(',') || '(无音效)')
+await advance(1.0)                  // 等投喂淡出
+DRAWS.length = 0
+await oneFrame()
+ok('吸走后场上没有米饭盆了', !DRAWS.some((d) => d.src.includes('rice.png')),
+  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+
+// ⑨ 多个盆**一起**锁定（只要有一个满 10 秒，全部锁定）
+await eatAllBowls()
+await advance(0.5)
+await spawnOne(); await advance(0.2)
+await spawnOne()
+// 等第一个满 10 秒（第二个此时才 ~9.8 秒，还没到自己满 10 秒）
+let bothLocked = false
+for (let i = 0; i < 140 && !bothLocked; i++) {
+  TEXTS.length = 0
+  await advance(0.1)
+  const xs = [...new Set(radarTexts().filter((t) => t.text === '白饭').map((t) => Math.round(t.x)))]
+  if (xs.length >= 2) bothLocked = true
+}
+ok('多个盆一起被锁定（各自都出现名牌）', bothLocked,
+  '同一帧里的名牌横向位置 ' + [...new Set(radarTexts().filter((t) => t.text === '白饭').map((t) => Math.round(t.x)))].join(','))
+
+// 清场
+await advance(9.0)
+await eatAllBowls()
+
 
 console.log('')
 console.log('=== 三期：火控雷达 ===')
@@ -635,6 +777,19 @@ ok('Andromedahk 链接正确', httpsLinks.some((l) => l.href === 'https://github
 ok('VKmich 链接正确', httpsLinks.some((l) => l.href === 'https://github.com/VKmich16/VK-1'))
 ok('whale 链接正确', httpsLinks.some((l) => l.href === 'https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget'))
 ok('外链均为新窗口打开', httpsLinks.length > 0 && httpsLinks.every((l) => l.target === '_blank'))
+// 许可证入口的文件名必须**按各自的项目**取，不能都指向 whale（曾经的写死 bug）
+const licTexts = []
+;(function collectLic(el) {
+  for (const c of (el.children || [])) {
+    if (String(c.className).indexOf('dshpet-about-reflink') >= 0) licTexts.push(c.textContent)
+    collectLic(c)
+  }
+})(aboutBox)
+const mitReaders = licTexts.filter((t) => t.indexOf('MIT 许可证原文') >= 0)
+ok('VK-1 与 whale 各有独立的 MIT 许可证入口', mitReaders.length >= 2,
+  mitReaders.length + ' 条：' + mitReaders.join(' / '))
+ok('许可证入口不再写死 whale', !licTexts.some((t) => t.indexOf('素材来源说明') >= 0 && t.indexOf('MIT 许可证原文') >= 0 && licTexts.length < 2),
+  licTexts.join(' | ').slice(0, 200))
 // 关掉，避免影响后续
 const aboutClose = aboutBox && aboutBox.children.filter((c) => String(c.className).indexOf('dshpet-about-actions') >= 0)[0]
 if (aboutClose) { click(aboutClose.children[0]); await flush(4) }

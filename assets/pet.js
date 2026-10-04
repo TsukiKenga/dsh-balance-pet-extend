@@ -358,12 +358,19 @@ function updateExpression(dt) {
 }
 
 // ============================================================================
-// 米饭盆充值玩法（来自上游 VK-1 v2）
+// 米饭盆充值玩法（来自上游 VK-1 v2 / 大肥鱼桌宠改_D-16BVM）
 // ============================================================================
-// 上游是整屏覆盖层：盆在显示器上飞、撞屏幕边缘弹、可用磁铁吸走。
-// 这里同样用**全屏覆盖层**：盆可以落在**整个 DSH 窗口底部的任意位置**，
-// 而不是只在挂件那一小块画布里。重力 / 弹性 / 反弹次数 / 空气阻力 / 滑动摩擦
-// 这些参数照抄上游；交互改成「点一下盆 = 投喂」。
+// 上游是整屏覆盖层：盆在屏幕上飞、撞屏幕边缘弹、被火控雷达锁定后吸走。
+// 这里同样用**全屏覆盖层**：盆可以落在**整个 DSH 窗口底部的任意位置**。
+// 重力 / 弹性 / 反弹次数 / 空气阻力 / 滑动摩擦这些参数照抄上游。
+//
+// 与上游一致的玩法要点（逐条对照过 dsh_pet.ps1）：
+//   · 场上**可以有多个盆**（一笔充值一个盆），盆之间有碰撞体积、落点会错开
+//   · 盆可以**拖**：按住拖到她身上就喂；也可以甩出去，松手时带出速度
+//   · 铁盆同理，但拖到她头顶会**扣在头上**
+//   · 一个盆落地满 BowlWaitSec(10s) 没被领取 → **所有盆一起锁定**；
+//     再过 LockDelaySec(1s) 开始按 SuckAccel 加速吸向她，吸到就自动喂
+//   · 名牌只认米饭盆（铁盆永远不会被锁定）
 //
 // 坐标约定：**盆 / 爱心 / 铁锅 / 雷达名牌全部用视口坐标**（相对窗口左上角），
 // 画在独立的 #dshpet-rice 覆盖层上；只有挂件本身用画布局部坐标。
@@ -376,15 +383,29 @@ var RICE_SLIDE_STOP = 14       // 上游 RiceSlideStop（px/s，低于它就停�
 var HEART_LIFE = 1.5
 var FEED_FADE = 0.5
 
+// —— 火控雷达的锁定与吸附（上游常量，按 side 折算成这里的尺度）——
+// 上游是 340 px 的中杯：SuckAccel 960、SuckMaxSpeed 2400 → 每单位 side 为 2.82 / 7.06
+var LOCK_DELAY_SEC = 1.0       // 上游 LockDelaySec：锁定后多久开始吸附
+function suckAccel() { return side * 2.82 }
+function suckMaxSpeed() { return side * 7.06 }
+// 名牌方括号边长 S = 1.33 × 盆的绘制直径（上游 ComputeBlip: S = 1.33 * bowlDia）
+function bracketS(b) { return 1.33 * b.r * 2 }
+
 var riceImg = null
 var ironImg = null
-var rice = null          // 场上同时只允许一个盆（与上游一致）
+var bowls = []           // 场上所有盆（米饭盆 + 至多一个铁盆），与上游的多目标一致
 var hearts = []          // 投喂时飘起的像素爱心
 var feedSound = null
-var radarOn = false      // 「打开火控雷达」：给盆挂一个锁定名牌
+var radarOn = false      // 「打开火控雷达」：提前把名牌亮出来给你看
 var potPendT = 0         // 投喂后延迟一小会儿再把锅丢下来
 var riceEl = null        // 全屏覆盖层画布
 var riceCtx = null
+// 拖动中的盆 + 采样出的「甩出速度」（上游 _throwVX/_throwVY：
+// 手拿着盆时 VX/VY 是停留的，接近率必须从光标轨迹采样，否则读数会冻住）
+var heldBowl = null
+var throwVX = 0, throwVY = 0
+var lastPtrX = 0, lastPtrY = 0, lastPtrT = 0
+var lastHeadClick = 0    // 双击头部拿铁盆用的时间戳
 
 function viewW() { return Math.max(1, window.innerWidth) }
 function viewH() { return Math.max(1, window.innerHeight) }
@@ -461,146 +482,284 @@ function playFeedSound() {
   } catch (err) {}
 }
 
+// 场上有活着的米饭盆吗（**铁盆不算**）—— 表情机与名牌都用这个判据。
+// 上游 anyBowl 同样排除铁盆：锅在头上不该把「盆没接」的计时算进去。
+function anyRiceBowl() {
+  for (var i = 0; i < bowls.length; i++) {
+    if (!bowls[i].iron && !bowls[i].fed) return true
+  }
+  return false
+}
+function ironBowl() {
+  for (var i = 0; i < bowls.length; i++) {
+    if (bowls[i].iron) return bowls[i]
+  }
+  return null
+}
+function liveBowls() {
+  var out = []
+  for (var i = 0; i < bowls.length; i++) {
+    if (!bowls[i].fed) out.push(bowls[i])
+  }
+  return out
+}
+
+function newBowl(props) {
+  var b = {
+    x: 0, y: 0, vx: 0, vy: 0, r: 10,
+    bounces: 0, fed: false, fedT: 0,
+    iron: false, onHead: false,
+    born: 0, restT: 0, grounded: false, amount: 0,
+    locked: false, lockT: 0, sucking: false,
+    dragging: false, grabX: 0, grabY: 0,
+  }
+  for (var k in props) { if (Object.prototype.hasOwnProperty.call(props, k)) b[k] = props[k] }
+  return b
+}
+
 function spawnRice(amount) {
-  if (!riceImg || rice) return
+  if (!riceImg) return
   var r = Math.max(10, side * 0.13)
-  // 落点在**整个窗口宽度**里随机 —— 不再局限于挂件画布，也不再需要靠 alpha 掩码
-  // 去躲开角色：窗口底部绝大多数位置本来就不在角色身上。
+  // 落点在**整个窗口宽度**里随机。上游是从屏幕右边缘丢下来，这里按需求改成
+  // 整条底边都可能 —— 见 README「与原版的差异」。
   var lo = r + side * 0.02, hi = viewW() - r - side * 0.02
   var startX = hi > lo ? lo + Math.random() * (hi - lo) : viewW() * 0.5
-  rice = {
+  // 一笔充值一个盆 —— 场上**可以同时有多个**（上游同）
+  bowls.push(newBowl({
     x: startX,
     y: -r,
-    // 上游有一支就是 VX=-120 / VY=40；这里保留一点横向漂移，落点仍是随机散布
+    // 保留一点横向漂移，落点仍是随机散布
     vx: (Math.random() - 0.5) * side * 1.6,
     vy: 40,
     r: r,
-    bounces: 0,
-    fed: false,
-    fedT: 0,
-    iron: false,
-    onHead: false,
-    born: 0,
     amount: amount || 0,
-  }
-  exprBowlAlive = true
-  exprBowlLocked = false
+  }))
   wake()
 }
 
 function spawnIronPot() {
-  if (!ironImg || rice) return
-  // 铁锅直接「出现」并落下，不飞行（上游 SpawnIronPot：VX=VY=0）。
-  // 它是**独立的一个物体**，不依附之前那个已被投喂的盆 —— 早期写法复用了 rice，
-  // 但投喂后盆 0.5 秒就淡出了，等 1.2 秒来掉锅时已经没有载体，锅永远出不来。
+  // 铁盆同时只会有一个：已经有一个在场（或扣在头上）时不再掉新的，
+  // 免得两个盆叠在一起（上游同）。
+  if (!ironImg || ironBowl()) return
   var rp = Math.max(12, side * 0.19)
   var hp = headPoint()
-  rice = {
+  bowls.push(newBowl({
     // 从她头顶正上方落下来，这样才能扣到头上
     x: hp.x,
     y: -rp,
-    vx: 0,
-    vy: 0,
     r: rp,
-    bounces: 0,
-    fed: false,
-    fedT: 0,
     iron: true,
-    onHead: false,
-    born: 0,
-    amount: 0,
-  }
+  }))
   wake()
 }
 
-// 把头上的锅敲掉（上游是双击头部）
+// 把头上的锅拿下来（上游是**双击**头部，调用方负责判双击）。
+// 上游的行为是「铁盆**渐隐消失**」，不是把它弹飞 —— 所以复用「投喂后淡出」那条通道。
 function knockPotOff() {
-  if (!rice || !rice.onHead) return
-  rice.onHead = false
-  rice.vy = -side * 0.55
-  rice.vx = (Math.random() - 0.5) * side * 1.2
-  rice.bounces = 0
+  var b = ironBowl()
+  if (!b || !b.onHead) return
+  b.onHead = false
+  b.fed = true          // fed + fedT 就是「渐隐后被移除」
+  b.fedT = 0
+  b.vx = 0; b.vy = 0
+  if (heldBowl === b) heldBowl = null
   exprPotOnHead = false
   wake()
 }
 
-function updateRice(dt) {
-  if (potPendT > 0) {
-    potPendT -= dt
-    if (potPendT <= 0) spawnIronPot()
+// 盆是不是碰到她了 —— 在盆的圆上采 9 个点，任一落在立绘不透明像素上就算碰到。
+// 上游：「碰到头发 / 头饰也算」。
+function bowlOnPet(b) {
+  var bx = (typeof state.x === 'number') ? state.x : ANCHOR_MARGIN
+  var by = (typeof state.y === 'number') ? state.y : 0
+  var m = masks[activeSpriteFile()]
+  if (!m || !m.data) {
+    return b.x + b.r > bx + spriteRect.x && b.x - b.r < bx + spriteRect.x + spriteRect.w &&
+           b.y + b.r > by + spriteRect.y && b.y - b.r < by + spriteRect.y + spriteRect.h
   }
-  if (!rice) { exprBowlAlive = false; exprPotOnHead = false; return }
-  // 上游的 anyBowl **排除铁锅**：锅在头上不该把「盆没接」的计时算进去，
-  // 也不该挡住 CALM 的判定（CALM 的条件正是「头上有锅 且 场上没有盆」）。
-  exprBowlAlive = !rice.iron && !rice.fed
-
-  var r = rice
-  if (r.fed) {
-    r.fedT += dt
-    if (r.fedT >= FEED_FADE) { rice = null; exprBowlAlive = false }
-    return
+  for (var i = 0; i < 9; i++) {
+    var a = (i / 9) * Math.PI * 2
+    var sx = b.x + (i === 0 ? 0 : Math.cos(a) * b.r * 0.8)
+    var sy = b.y + (i === 0 ? 0 : Math.sin(a) * b.r * 0.8)
+    var nx = Math.round((sx - bx - spriteRect.x) / spriteRect.w * m.w)
+    var ny = Math.round((sy - by - spriteRect.y) / spriteRect.h * m.h)
+    if (nx < 0 || ny < 0 || nx >= m.w || ny >= m.h) continue
+    if (m.data[(ny * m.w + nx) * 4 + 3] > 8) return true
   }
-  r.born += dt
-  var hp = headPoint()
+  return false
+}
 
-  if (r.onHead) {
-    // 戴上之后物理关闭，位置绑在头上（上游同）。注意是**视口坐标**，
-    // 所以角色被拖走时锅会跟着走。
-    r.x = hp.x
-    r.y = hp.y
-    exprPotOnHead = true
-    return
-  }
-  exprPotOnHead = false
+// 投喂某一个盆（多盆之后必须按对象投喂，不能再用「场上的那个盆」）
+function feedBowl(b) {
+  if (!b || b.fed || b.iron) return
+  b.fed = true
+  b.fedT = 0
+  b.dragging = false
+  b.locked = false
+  b.sucking = false
+  if (heldBowl === b) heldBowl = null
+  // 锅只在米饭盆被投喂后才出现
+  potPendT = 1.2
+  spawnHearts()
+  playFeedSound()
+  wake()
+}
 
-  // 铁锅落到头部高度就「戴上」（上游有 HeadFalling → OnHead 两段，这里合一）
-  if (r.iron && (r.y + r.r * 0.35) >= hp.y) {
-    r.onHead = true
-    r.vx = 0; r.vy = 0
-    wake()
-    return
-  }
-
-  // 重力 + 空气阻力
-  r.vy += RICE_GRAVITY * dt
-  var drag = Math.max(0, 1 - RICE_AIR_DRAG * dt)
-  r.vx *= drag
-  r.vy *= drag
-  r.x += r.vx * dt
-  r.y += r.vy * dt
-
-  // 左右墙 = 窗口左右边
-  var vw = viewW()
-  if (r.x - r.r < 0) { r.x = r.r; r.vx = Math.abs(r.vx) * RICE_RESTITUTION }
-  if (r.x + r.r > vw) { r.x = vw - r.r; r.vx = -Math.abs(r.vx) * RICE_RESTITUTION }
-
-  // 地面 = 窗口底边：弹几下之后转为滑动，最后停住
-  var floor = riceGroundY()
-  if (r.y + r.r > floor) {
-    r.y = floor - r.r
-    if (Math.abs(r.vy) > 90 && r.bounces < RICE_MAX_BOUNCES) {
-      r.vy = -Math.abs(r.vy) * RICE_RESTITUTION
-      r.bounces += 1
-    } else {
-      r.vy = 0
-      // 滑动摩擦
-      var f = RICE_SLIDE_FRICTION * dt * 60
-      if (Math.abs(r.vx) <= RICE_SLIDE_STOP) r.vx = 0
-      else r.vx -= Math.sign(r.vx) * Math.min(Math.abs(r.vx), f * 8)
+// 盆与盆之间的碰撞：等质量、沿法线交换法向速度（带弹性）。
+// 上游：「它们彼此有碰撞体积、落点会错开，不会叠成一堆」。
+function separateBowls() {
+  for (var i = 0; i < bowls.length; i++) {
+    for (var j = i + 1; j < bowls.length; j++) {
+      var a = bowls[i], b = bowls[j]
+      if (a.fed || b.fed || a.onHead || b.onHead || a.dragging || b.dragging) continue
+      var dx = b.x - a.x, dy = b.y - a.y
+      var d = Math.sqrt(dx * dx + dy * dy)
+      var minD = a.r + b.r
+      if (d >= minD || d < 1e-6) continue
+      var nx = dx / d, ny = dy / d
+      var push = (minD - d) / 2
+      a.x -= nx * push; a.y -= ny * push
+      b.x += nx * push; b.y += ny * push
+      var vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny
+      if (vn < 0) {
+        var imp = -(1 + RICE_RESTITUTION) * vn / 2
+        a.vx -= imp * nx; a.vy -= imp * ny
+        b.vx += imp * nx; b.vy += imp * ny
+      }
     }
   }
 }
 
-// 投喂：把盆递给她
+function updateBowls(dt) {
+  if (potPendT > 0) {
+    potPendT -= dt
+    if (potPendT <= 0) spawnIronPot()
+  }
+  var hp = headPoint()
+
+  // —— 锁定判定 ——
+  // 「只要有一个米饭盆落地满 BowlWaitSec 没被领取，**所有**盆一起锁定」。
+  // 上游的例子：第 1 个盆满 10 秒时，刚掉下来 2 秒的那个也一起被锁。
+  var trigger = false
+  for (var i = 0; i < bowls.length; i++) {
+    var q = bowls[i]
+    if (q.iron || q.fed || q.dragging || q.locked) continue
+    if (q.restT >= BOWL_WAIT_SEC) trigger = true
+  }
+  if (trigger) {
+    for (var i = 0; i < bowls.length; i++) {
+      var q = bowls[i]
+      if (!q.iron && !q.fed) { q.locked = true; q.lockT = 0 }
+    }
+    exprBowlLocked = true
+    wake()
+  }
+
+  for (var i = bowls.length - 1; i >= 0; i--) {
+    var r = bowls[i]
+    if (r.fed) {
+      r.fedT += dt
+      if (r.fedT >= FEED_FADE) {
+        bowls.splice(i, 1)
+        if (heldBowl === r) heldBowl = null
+      }
+      continue
+    }
+    r.born += dt
+
+    // —— 手拿着：位置交给指针，跳过物理；碰到她就喂 ——
+    if (r.dragging) {
+      r.restT = 0
+      if (!r.iron && bowlOnPet(r)) { feedBowl(r); continue }
+      continue
+    }
+
+    // —— 扣在头上：物理关闭，位置绑在头上（角色被拖走时锅跟着走）——
+    if (r.onHead) {
+      r.x = hp.x
+      r.y = hp.y
+      continue
+    }
+
+    // —— 铁盆落到头部高度、且横向也在头附近 → 扣上 ——
+    if (r.iron && r.vy >= 0 && (r.y + r.r * 0.35) >= hp.y &&
+        Math.abs(r.x - hp.x) <= spriteRect.w * 0.30) {
+      r.onHead = true
+      r.vx = 0; r.vy = 0
+      wake()
+      continue
+    }
+
+    // —— 吸附：锁定满 LockDelaySec 后开始，按 SuckAccel 加速朝她飞 ——
+    if (r.locked) {
+      r.lockT += dt
+      if (r.lockT >= LOCK_DELAY_SEC) r.sucking = true
+    }
+    if (r.sucking) {
+      var dx = hp.x - r.x, dy = hp.y - r.y
+      var d = Math.sqrt(dx * dx + dy * dy) || 1e-6
+      if (d < r.r + side * 0.05) { feedBowl(r); continue }
+      r.vx += (dx / d) * suckAccel() * dt
+      r.vy += (dy / d) * suckAccel() * dt
+      var sp = Math.sqrt(r.vx * r.vx + r.vy * r.vy)
+      var cap = suckMaxSpeed()
+      if (sp > cap) { r.vx = r.vx / sp * cap; r.vy = r.vy / sp * cap }
+      r.x += r.vx * dt
+      r.y += r.vy * dt
+      continue
+    }
+
+    // —— 重力 + 空气阻力 ——
+    r.vy += RICE_GRAVITY * dt
+    var drag = Math.max(0, 1 - RICE_AIR_DRAG * dt)
+    r.vx *= drag
+    r.vy *= drag
+    r.x += r.vx * dt
+    r.y += r.vy * dt
+
+    // 左右墙 = 窗口左右边
+    var vw = viewW()
+    if (r.x - r.r < 0) { r.x = r.r; r.vx = Math.abs(r.vx) * RICE_RESTITUTION }
+    if (r.x + r.r > vw) { r.x = vw - r.r; r.vx = -Math.abs(r.vx) * RICE_RESTITUTION }
+
+    // 地面 = 窗口底边：弹几下之后转为滑动，最后停住
+    var floor = riceGroundY()
+    r.grounded = false
+    if (r.y + r.r > floor) {
+      r.y = floor - r.r
+      r.grounded = true
+      if (Math.abs(r.vy) > 90 && r.bounces < RICE_MAX_BOUNCES) {
+        r.vy = -Math.abs(r.vy) * RICE_RESTITUTION
+        r.bounces += 1
+      } else {
+        r.vy = 0
+        // 滑动摩擦
+        var f = RICE_SLIDE_FRICTION * dt * 60
+        if (Math.abs(r.vx) <= RICE_SLIDE_STOP) r.vx = 0
+        else r.vx -= Math.sign(r.vx) * Math.min(Math.abs(r.vx), f * 8)
+      }
+    }
+
+    // 「落地后 10 秒」—— 只在地面上待着时才累计（被拿起来就清零）
+    if (r.grounded && Math.abs(r.vx) < RICE_SLIDE_STOP * 4) r.restT += dt
+    else r.restT = 0
+  }
+
+  separateBowls()
+
+  // 表情机用的两个开关
+  exprBowlAlive = anyRiceBowl()
+  var ib = ironBowl()
+  exprPotOnHead = !!(ib && ib.onHead)
+  // 米饭盆全被吃光 → 解除锁定
+  if (!exprBowlAlive) exprBowlLocked = false
+}
+
+// 兼容旧调用：喂「最靠前的一个米饭盆」（菜单以外的内部路径还会用到）
 function feedRice() {
-  if (!rice || rice.fed) return
-  rice.fed = true
-  rice.fedT = 0
-  // 锅只在**非铁锅**的盆被投喂后才出现，且场上只能有一个
-  if (!rice.iron) potPendT = 1.2
-  spawnHearts()
-  playFeedSound()
-  wake()
+  for (var i = 0; i < bowls.length; i++) {
+    if (!bowls[i].iron && !bowls[i].fed) { feedBowl(bowls[i]); return }
+  }
 }
 
 function spawnHearts() {
@@ -660,23 +819,30 @@ function drawHeartsOn(c) {
 }
 
 function drawRiceOn(c) {
-  if (!rice) return
-  var r = rice
-  var img = r.iron ? ironImg : riceImg
-  if (!img) return
-  var size = r.r * 2
-  c.save()
-  if (r.fed) c.globalAlpha = Math.max(0, 1 - r.fedT / FEED_FADE)
-  c.drawImage(img, r.x - r.r, r.y - r.r, size, size)
-  c.restore()
-  if (radarOn && !r.fed) drawRadar(c, r)
+  // 多盆：先画所有盆（被吃的那个淡出），再画名牌 —— 名牌要盖在盆上面
+  for (var i = 0; i < bowls.length; i++) {
+    var r = bowls[i]
+    var img = r.iron ? ironImg : riceImg
+    if (!img) continue
+    var size = r.r * 2
+    c.save()
+    if (r.fed) c.globalAlpha = Math.max(0, 1 - r.fedT / FEED_FADE)
+    c.drawImage(img, r.x - r.r, r.y - r.r, size, size)
+    c.restore()
+  }
+  // 名牌只认米饭盆：铁盆永远不会被锁定（上游同）。radarOn 是菜单里手动提前亮出来看。
+  for (var j = 0; j < bowls.length; j++) {
+    var b = bowls[j]
+    if (b.iron || b.fed) continue
+    if (b.locked || radarOn) drawRadar(c, b)
+  }
 }
 
 // 全屏覆盖层：清空后重画盆 / 爱心 / 雷达名牌。
 // 每帧都清一遍 —— 否则上一帧的盆会留在画面上擦不掉。
 function drawRiceLayer() {
   if (!riceCtx || !riceEl) return
-  if (!rice && !hearts.length) {
+  if (!bowls.length && !hearts.length) {
     // 没东西可画时也要清掉残留（比如盆刚被投喂淡出）
     if (riceEl._dirty !== false) {
       riceCtx.setTransform(1, 0, 0, 1, 0, 0)
@@ -700,54 +866,99 @@ function drawRiceLayer() {
   drawHeartsOn(riceCtx)
 }
 
-// 「打开火控雷达」：皇牌空战风格的目标名牌 —— 括号 + 类型/距离/接近率/高度/方位。
-// 全部用视口坐标；距离/高度/方位都以**角色的头**为参照。
-function drawRadar(c, r) {
-  var w = r.r * 1.9, h = r.r * 1.9
-  var cx = r.x, cy = r.y
-  var hp = headPoint()
-  var px = cx - hp.x
-  var py = cy - hp.y
-  var dist = Math.sqrt(px * px + py * py) + 1
-  var alt = riceGroundY() - cy
-  var dir = (Math.atan2(px, -py) * 180 / Math.PI + 360) % 360
-  var closure = (-(px * r.vx + py * r.vy) / dist)
+// 火控雷达目标名牌（《战争雷霆》风格）—— 几何**逐条照抄上游** ComputeBlip / DrawRadar：
+//   · 参照点 = 角色的**头**（GirlRefScreen）
+//   · 方括号边长 S = 1.33 × 盆的绘制直径；四角臂长 0.30 S，纯平色、**没有外发光**
+//     （上游专门注释过：设计稿里的 1px 光晕是截图 JPEG 伪影，试过、不对、已移除）
+//   · 类型字 0.40 S 居中在括号上方；数字字 0.30 S
+//   · 距离在括号右侧（左边缘 x1 + 0.08 S），接近率在右下（底边贴 y1）
+//   · 相对高度右对齐在 x1 + 0.11 S、顶边 y1 + 0.09 S
+//   · 方向环：圆心 (cx, y1 + 0.70 S)，半径 0.185 S，描边 0.075 S；
+//     指针从环外缘沿方位角伸出 0.15 S
+//   · 上游**刻意不做屏幕边缘避让**（贴边裁掉可以接受，缩小字号会看不清）
+function fmtKpx(v) {
+  if (!isFinite(v)) return '--'
+  if (v < 0) v = 0
+  return (v / 1000).toFixed(1) + ' kpx'
+}
+function fmtPxS(v) {
+  if (!isFinite(v)) return '--'
+  var r = Math.round(v)
+  if (r === 0) r = 0                     // 消掉 -0
+  return r + ' px/s'
+}
+function fmtPx(v) {
+  if (!isFinite(v)) return '--'
+  var r = Math.round(v)
+  if (r === 0) r = 0
+  return r + ' px'
+}
+
+function drawRadar(c, b) {
+  var S = bracketS(b)
+  var cx = b.x, cy = b.y
+  var x0 = cx - S / 2, x1 = cx + S / 2
+  var y0 = cy - S / 2, y1 = cy + S / 2
+  var stroke = Math.max(1, 0.075 * S)
+  var green = '#00ff08'                  // 上游是纯平的 (0,255,8)
 
   c.save()
-  c.strokeStyle = '#39ff88'
-  c.fillStyle = '#39ff88'
-  c.lineWidth = Math.max(1, side * 0.006)
-  c.font = Math.max(8, side * 0.055) + 'px ui-monospace,Consolas,monospace'
+  c.strokeStyle = green
+  c.fillStyle = green
   c.textBaseline = 'middle'
-  // 四个角括号
-  var L = Math.max(5, side * 0.045)
-  var x0 = cx - w / 2, x1 = cx + w / 2, y0 = cy - h / 2, y1 = cy + h / 2
-  var corners = [[x0, y0, 1, 1], [x1, y0, -1, 1], [x0, y1, 1, -1], [x1, y1, -1, -1]]
-  for (var i = 0; i < corners.length; i++) {
-    var q = corners[i]
-    c.beginPath()
-    c.moveTo(q[0] + q[2] * L, q[1]); c.lineTo(q[0], q[1]); c.lineTo(q[0], q[1] + q[3] * L)
-    c.stroke()
-  }
-  // 名牌文字：贴着括号右下往外排，靠右边时改到左侧，免得跑出窗口
-  var lines = [
-    r.iron ? '铁锅' : '白饭',
-    'DIST ' + Math.round(dist) + 'px',
-    'CLOSE ' + (closure >= 0 ? '+' : '') + closure.toFixed(0) + 'px/s',
-    'ALT ' + Math.round(alt) + 'px',
-    'DIR ' + Math.round(dir).toString().padStart(3, '0') + '°',
-  ]
-  var lh = Math.max(8, side * 0.055) * 1.2
-  var tw = 0
-  for (var m = 0; m < lines.length; m++) {
-    var mt = c.measureText ? c.measureText(lines[m]).width : 0
-    if (mt > tw) tw = mt
-  }
-  var left = x0 - Math.max(6, side * 0.04) - tw
-  var tx = (left > 4) ? left : (x1 + Math.max(4, side * 0.03))
-  for (var k = 0; k < lines.length; k++) {
-    c.fillText(lines[k], tx, y0 + k * lh)
-  }
+
+  // —— 四角方括号：横臂 + 竖臂，用矩形填充（上游 FillRectangle，无圆角、无光晕）——
+  var len = 0.30 * S
+  c.fillRect(x0, y0, len, stroke); c.fillRect(x1 - len, y0, len, stroke)
+  c.fillRect(x0, y1 - stroke, len, stroke); c.fillRect(x1 - len, y1 - stroke, len, stroke)
+  c.fillRect(x0, y0, stroke, len); c.fillRect(x1 - stroke, y0, stroke, len)
+  c.fillRect(x0, y1 - len, stroke, len); c.fillRect(x1 - stroke, y1 - len, stroke, len)
+
+  // —— 读数：与上游同一套换算 ——
+  var hp = headPoint()
+  var dx = cx - hp.x, dy = cy - hp.y
+  var dist = Math.sqrt(dx * dx + dy * dy) || 1e-6
+  var ux = dx / dist, uy = dy / dist
+  // 手拿着盆时 VX/VY 是停留的（留着松手用），接近率必须取光标轨迹采样值，
+  // 否则「拿在手里不动」会一直报着停下前的那个读数（上游踩过这个坑）。
+  var vx = b.dragging ? throwVX : b.vx
+  var vy = b.dragging ? throwVY : b.vy
+  var closure = -(vx * ux + vy * uy)     // 正 = 正在靠近
+  var alt = -dy                          // 正 = 盆比她的头高
+  var dirDeg = Math.atan2(uy, ux) * 180 / Math.PI
+
+  var typeH = Math.max(11, 0.40 * S)
+  var numH = Math.max(11, 0.30 * S)
+  var gapX = 0.08 * S
+
+  // 类型：居中在括号上方
+  c.font = '700 ' + typeH + 'px ui-monospace,Consolas,monospace'
+  c.textAlign = 'center'
+  c.fillText('白饭', cx, y0 - 0.06 * S - typeH / 2)
+  // 数字：统一左对齐
+  c.textAlign = 'left'
+  c.font = '700 ' + numH + 'px ui-monospace,Consolas,monospace'
+  c.fillText(fmtKpx(dist), x1 + gapX, y0 + numH / 2)
+  c.fillText(fmtPxS(closure), x1 + gapX, y1 - numH / 2)
+  // 相对高度：右对齐在括号右下方
+  c.textAlign = 'right'
+  c.fillText(fmtPx(alt), x1 + 0.11 * S, y1 + 0.09 * S + numH / 2)
+
+  // —— 方向环 + 指针 ——
+  var ringR = 0.185 * S
+  var ringStroke = 0.075 * S
+  var rcx = cx, rcy = y1 + 0.70 * S
+  c.lineWidth = ringStroke
+  c.beginPath()
+  c.arc(rcx, rcy, ringR - ringStroke / 2, 0, Math.PI * 2)
+  c.stroke()
+  var ang = dirDeg * Math.PI / 180
+  c.beginPath()
+  c.moveTo(rcx + Math.cos(ang) * (ringR + ringStroke * 0.5),
+           rcy + Math.sin(ang) * (ringR + ringStroke * 0.5))
+  c.lineTo(rcx + Math.cos(ang) * (ringR + 0.15 * S),
+           rcy + Math.sin(ang) * (ringR + 0.15 * S))
+  c.stroke()
   c.restore()
 }
 
@@ -1085,7 +1296,7 @@ function tick(dt) {
   if (celebrateTime > 0) celebrateTime = Math.max(0, celebrateTime - dt)
   if (topupTime > 0) topupTime = Math.max(0, topupTime - dt)
   if (nervousT > 0) nervousT = Math.max(0, nervousT - dt)
-  updateRice(dt)
+  updateBowls(dt)
   updateHearts(dt)
   updateExpression(dt)
   if (demoRestoreTime > 0) {
@@ -1139,7 +1350,7 @@ function needsAnimation() {
     floating.length > 0 || pendingSteps > 0 || demoRemaining > 0 || !!snapAnim ||
     // 表情状态机也得算「还忙」：紧张表情的最后 1 秒保持靠 tick 倒数，
     // 漏掉这一项的话扣费动画一停、帧循环就断，表情会永远卡在紧张上。
-    nervousT > 0 || exprBowlAlive || !!rice || hearts.length > 0 || potPendT > 0
+    nervousT > 0 || exprBowlAlive || bowls.length > 0 || hearts.length > 0 || potPendT > 0
 }
 
 function frame(ts) {
@@ -1369,7 +1580,8 @@ function localPoint(e) {
 
 function onPointerMove(e) {
   if (destroyed || !container || state.hidden) return
-  if (dragging) return // 拖动中不切换穿透
+  if (dragging) return       // 拖动角色时不切换穿透
+  if (heldBowl) return       // 拖着盆时同理
   var p = localPoint(e)
   var inside = p.x >= 0 && p.y >= 0 && p.x <= W && p.y <= H
   var opaque = inside && hitTest(p.x, p.y)
@@ -1384,6 +1596,65 @@ function isInMenu(target) {
   try { return !!(menuEl && menuEl.root && target && menuEl.root.contains(target)) } catch (err) { return false }
 }
 
+// ============================================================================
+// 拖盆（上游：左键按住盆拖动，拖到角色身上喂 / 拖到头顶扣上；也可甩出去）
+// 盆画在 pointer-events:none 的覆盖层上，所以命中判定得在这里自己按视口坐标做。
+// ============================================================================
+function nowMs() {
+  return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+}
+function bowlAt(x, y) {
+  // 从后往前找：后画的在上层
+  for (var i = bowls.length - 1; i >= 0; i--) {
+    var b = bowls[i]
+    if (b.fed) continue
+    // 扣在头上的铁盆**不参与拖动** —— 它就压在她头顶，否则会抢走「双击头部」
+    // 的判定（真 bug：锅扣上后点她的头只会把锅又拖起来，敲不掉）。
+    if (b.onHead) continue
+    var dx = x - b.x, dy = y - b.y
+    var rr = b.r * 1.15                  // 比视觉半径放宽一点，好点中
+    if (dx * dx + dy * dy <= rr * rr) return b
+  }
+  return null
+}
+
+function onBowlDragMove(e) {
+  if (!heldBowl) return
+  // 采样光标轨迹算「甩出速度」。上游同样这么做 —— 手拿着盆时 VX/VY 是停留的，
+  // 不从轨迹采样的话，接近率读数会一直停在停下前的那个值（上游踩过这个坑）。
+  var t = nowMs()
+  var dt = (t - lastPtrT) / 1000
+  if (dt > 0.001 && dt < 0.2) {
+    throwVX = (e.clientX - lastPtrX) / dt
+    throwVY = (e.clientY - lastPtrY) / dt
+  }
+  lastPtrX = e.clientX; lastPtrY = e.clientY; lastPtrT = t
+  heldBowl.x = e.clientX - heldBowl.grabX
+  heldBowl.y = e.clientY - heldBowl.grabY
+  heldBowl.vx = throwVX * 0.35
+  heldBowl.vy = throwVY * 0.35
+  e.preventDefault()
+}
+
+function onBowlDragEnd(e) {
+  window.removeEventListener('pointermove', onBowlDragMove, true)
+  window.removeEventListener('pointerup', onBowlDragEnd, true)
+  var b = heldBowl
+  heldBowl = null
+  if (!b) return
+  b.dragging = false
+  b.x = e.clientX - b.grabX
+  b.y = e.clientY - b.grabY
+  // 松手带着甩出的速度飞出去 —— 这样可以把铁盆「扔」到她头顶让它自己落下去
+  b.vx = throwVX * 0.35
+  b.vy = throwVY * 0.35
+  b.bounces = 0
+  b.restT = 0
+  wake()
+}
+
+// ============================================================================
+
 function onPointerDown(e) {
   if (destroyed || !container || state.hidden) return
   // 点在菜单上：**完全放行** —— 既不关菜单，也不触发拖动。
@@ -1392,26 +1663,45 @@ function onPointerDown(e) {
   // 于是所有**子菜单项**（切换角色 / 尺寸 / 刷新间隔 / 演示连续扣费）全部点不动。
   if (isInMenu(e.target)) return
 
-  // 米饭盆与铁锅**现在活动在整个窗口里**，所以必须在「是否落在挂件盒子里」之前判定，
+  // 米饭盆与铁锅**活动在整个窗口里**，所以必须在「是否落在挂件盒子里」之前判定，
   // 而且用的是**视口坐标**（e.clientX/Y），不是画布局部坐标。
   // 命中时吞掉事件：同一击不该再落到下面的 DSH 界面上。
   if (e.button !== 2 && !e.ctrlKey) {
-    if (rice && !rice.fed) {
-      var bdx = e.clientX - rice.x, bdy = e.clientY - rice.y
-      if (Math.sqrt(bdx * bdx + bdy * bdy) <= rice.r * 1.3) {
-        e.preventDefault(); e.stopPropagation()
-        feedRice()
-        return
-      }
+    // ① 点在盆上 → 按住拖动（拖到她身上就喂；铁盆拖到头顶就扣上；也可甩出去）
+    var hitBowl = bowlAt(e.clientX, e.clientY)
+    if (hitBowl) {
+      e.preventDefault(); e.stopPropagation()
+      heldBowl = hitBowl
+      hitBowl.dragging = true
+      hitBowl.locked = false
+      hitBowl.lockT = 0
+      hitBowl.sucking = false
+      hitBowl.restT = 0
+      hitBowl.grabX = e.clientX - hitBowl.x
+      hitBowl.grabY = e.clientY - hitBowl.y
+      throwVX = 0; throwVY = 0
+      lastPtrX = e.clientX; lastPtrY = e.clientY; lastPtrT = nowMs()
+      window.addEventListener('pointermove', onBowlDragMove, true)
+      window.addEventListener('pointerup', onBowlDragEnd, true)
+      wake()
+      return
     }
-    if (rice && rice.onHead) {
+    // ② 双击她的头 → 把铁盆敲掉（上游是**双击**，不是单击）。
+    //    第一次点只记时间、照常走下面的拖动逻辑 —— 否则就没法抓着头拖她了。
+    var ib = ironBowl()
+    if (ib && ib.onHead) {
       var hp = headPoint()
       if (Math.abs(e.clientX - hp.x) <= spriteRect.w * 0.35 &&
           e.clientY >= hp.y - spriteRect.h * 0.15 &&
           e.clientY <= hp.y + spriteRect.h * 0.35) {
-        e.preventDefault(); e.stopPropagation()
-        knockPotOff()
-        return
+        var t = nowMs()
+        if (t - lastHeadClick < 420) {
+          lastHeadClick = 0
+          e.preventDefault(); e.stopPropagation()
+          knockPotOff()
+          return
+        }
+        lastHeadClick = t
       }
     }
   }
@@ -2003,6 +2293,13 @@ function aboutLink(url) {
 // `dsh-app://app/dsh-pet/license.txt`，壳子不允许打开这种地址 ⇒ **点了没反应**。
 // （https 外链不受影响，所以 GitHub 链接仍用普通 <a>。）
 // 这里改成：点一下 → fetch 取回文本 → 直接在本弹层里显示。
+// 从 '/dsh-pet/license.txt?f=xxx.txt' 里取出文件名 —— 许可证入口的单一数据源
+function licenseFileFrom(url) {
+  var m = /[?&]f=([^&]+)/.exec(String(url || ''))
+  if (!m) return ''
+  try { return decodeURIComponent(m[1]) } catch (err) { return m[1] }
+}
+
 function licenseAnchor(file, labelText) {
   var a = document.createElement('a')
   a.className = 'dshpet-about-link'
@@ -2226,19 +2523,24 @@ function showAbout() {
       lk.className = 'dshpet-about-reflink'
       lk.appendChild(aboutLink(ref.url))
       box.appendChild(lk)
-      // 许可证：有原文链接就链过去（可点开阅读），没有就如实写出状态
-      if (ref.licenseUrl) {
+      // 许可证：有原文链接就链过去（可点开阅读），没有就如实写出状态。
+      // 文件名**从 ref.licenseUrl / provenanceUrl 里解析** —— 曾经这里把
+      // 'whale-LICENSE.txt' 写死了，于是每一条参考项目点开都是 whale 的许可证
+      //（加了 VK-1 的 MIT 之后才暴露出来）。
+      var licFile = licenseFileFrom(ref.licenseUrl)
+      if (licFile) {
         var lic = document.createElement('div')
         lic.className = 'dshpet-about-reflink'
         var lab = document.createElement('span')
         lab.textContent = (ref.license ? ref.license + ' 许可证原文：' : '许可证：')
         lic.appendChild(lab)
-        lic.appendChild(licenseAnchor('whale-LICENSE.txt', '点此阅读'))
-        if (ref.provenanceUrl) {
+        lic.appendChild(licenseAnchor(licFile, '点此阅读'))
+        var provFile = licenseFileFrom(ref.provenanceUrl)
+        if (provFile) {
           var lab2 = document.createElement('span')
           lab2.textContent = '　素材来源说明：'
           lic.appendChild(lab2)
-          lic.appendChild(licenseAnchor('whale-PROVENANCE.txt', '点此阅读'))
+          lic.appendChild(licenseAnchor(provFile, '点此阅读'))
         }
         box.appendChild(lic)
       } else if (ref.licenseLabel) {
