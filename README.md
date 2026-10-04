@@ -1,5 +1,5 @@
 # DSH余额桌宠 · DSH Balance Pet Enhanced
->「本项目基于 [VKmich16/VK-1](https://www.github.com/VKmich16/VK-1) 二次开发
+>「本项目基于 [VKmich16/VK-1](https://www.github.com/VKmich16/VK-1) 二次开发」
 
 贴在 **DSH** 页面里的余额桌宠：角色举着一块倾斜的平板，实时显示你的余额。
 
@@ -240,7 +240,7 @@ node test/smoke.mjs
 | 素材 | 说明 |
 | --- | --- |
 | `assets/sprites/*.png`（5 张角色立绘） | 来自 Mac 分支 [DSH-DaFeiYu-Desktop-Pet](https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet) —— 该分支明确写明**不另行授予**代码、素材或衍生图片的许可，而且立绘是在 Windows 原图基础上 AI 补全的 |
-| `assets/certificate.png` | 来源不明 |
+| `assets/certificate.png` | 由GPT大小姐生成 |
 
 **不可再分发**：`assets/congrats-turn.mp3`（vjshi 商业素材）、
 `assets/congrats-settle.mp3`（有版权的电影配乐）。
