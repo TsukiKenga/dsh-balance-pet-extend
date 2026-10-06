@@ -796,6 +796,80 @@ if (aboutClose) { click(aboutClose.children[0]); await flush(4) }
 ok('关于对话框可关闭', !doc.body.children.some((c) => c.id === 'dshpet-about'))
 
 console.log('')
+console.log('=== 回归：隐藏桌宠必须是可逆的 ===')
+// 背景（用户报的真 bug）：隐藏后 container 变 display:none，桌宠自己的右键菜单
+// 再也打不开；而「显示桌宠」原来**只**存在于那个菜单里 ⇒ 隐藏 = 单程票，
+// 只能手动改 localStorage 才能恢复。
+const rootEl = doc.body.children.filter((c) => c.id === 'dshpet-root')[0]
+ok('找得到桌宠容器', !!rootEl)
+
+// ① 隐藏**之前**菜单就得写明怎么恢复
+await openMenu()
+const hideRow = rowBy(menuRoot, '隐藏桌宠')
+ok('菜单有「隐藏桌宠」', !!hideRow)
+ok('「隐藏桌宠」上写明了恢复热键', !!hideRow && hideRow.textContent.includes('Ctrl+Shift+H'),
+  hideRow ? hideRow.textContent : '(没有这一项)')
+if (hideRow) { click(hideRow); await flush(6) }
+ok('点「隐藏桌宠」后容器 display:none', rootEl.style.display === 'none', String(rootEl.style.display))
+
+// ② 隐藏后右键**页面任意位置**要能唤出恢复菜单（不能只在角色像素上）
+doc.fire('contextmenu', { button: 2, clientX: 900, clientY: 420 })
+await flush(6)
+ok('隐藏后右键页面任意位置能唤出菜单', menuRoot.style.display === 'block', String(menuRoot.style.display))
+const showRow = rowBy(menuRoot, '显示桌宠')
+ok('恢复菜单里有「显示桌宠」', !!showRow, rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+if (showRow) { click(showRow); await flush(6) }
+ok('点「显示桌宠」后容器恢复 display:block', rootEl.style.display === 'block', String(rootEl.style.display))
+
+// ③ Ctrl+Shift+H 热键：任何时候都能切换（不必右键、不必知道菜单在哪）
+doc.fire('keydown', { ctrlKey: true, shiftKey: true, key: 'h' })
+await flush(4)
+ok('Ctrl+Shift+H 能隐藏', rootEl.style.display === 'none', String(rootEl.style.display))
+doc.fire('keydown', { ctrlKey: true, shiftKey: true, key: 'h' })
+await flush(4)
+ok('Ctrl+Shift+H 能把桌宠叫回来', rootEl.style.display === 'block', String(rootEl.style.display))
+
+// ④ 不该误触发
+doc.fire('keydown', { key: 'h' })
+await flush(4)
+ok('单独按 H 不会隐藏桌宠', rootEl.style.display === 'block', String(rootEl.style.display))
+doc.fire('keydown', { ctrlKey: true, key: 'h' })
+await flush(4)
+ok('Ctrl+H 不会隐藏桌宠（必须带 Shift）', rootEl.style.display === 'block', String(rootEl.style.display))
+doc.fire('keydown', { ctrlKey: true, shiftKey: true, altKey: true, key: 'h' })
+await flush(4)
+ok('Ctrl+Shift+Alt+H 不会隐藏桌宠', rootEl.style.display === 'block', String(rootEl.style.display))
+
+// ⑤ 在输入框里打字时不能抢键
+const fakeInput = doc.createElement('input')
+doc.fire('keydown', { ctrlKey: true, shiftKey: true, key: 'h', target: fakeInput })
+await flush(4)
+ok('在输入框里按 Ctrl+Shift+H 不会抢键', rootEl.style.display === 'block', String(rootEl.style.display))
+
+// ⑥ 恢复之后功能正常：可见时右键**空白处**仍然不该弹菜单（不能因为修 bug 就到处接管右键）
+doc.fire('contextmenu', { button: 2, clientX: 900, clientY: 420 })
+await flush(4)
+ok('可见时右键空白处不会弹出菜单', menuRoot.style.display !== 'block', String(menuRoot.style.display))
+// 而右键桌宠本体照常
+await openMenu()
+ok('恢复后桌宠本体的右键菜单正常', menuRoot.style.display === 'block' &&
+  rowsOf(menuRoot).length > 10, rowsOf(menuRoot).length + ' 项')
+
+// ⑦ 隐藏时唤出的恢复菜单，点空白处应当能关掉
+click(hideRow || rowBy(menuRoot, '隐藏桌宠'))
+await flush(6)
+doc.fire('contextmenu', { button: 2, clientX: 700, clientY: 300 })
+await flush(6)
+ok('隐藏后能唤出恢复菜单（第二次）', menuRoot.style.display === 'block', String(menuRoot.style.display))
+doc.fire('pointerdown', { button: 0, clientX: 200, clientY: 200 })
+await flush(4)
+ok('恢复菜单点空白处能关掉', menuRoot.style.display !== 'block', String(menuRoot.style.display))
+// 收尾：把桌宠叫回来
+doc.fire('keydown', { ctrlKey: true, shiftKey: true, key: 'h' })
+await flush(4)
+ok('收尾：桌宠已恢复显示', rootEl.style.display === 'block', String(rootEl.style.display))
+
+console.log('')
 console.log('运行期错误: ' + (runtimeErrors.length ? runtimeErrors.slice(0, 3).join(' | ') : '（无）'))
 console.log('结果: ' + pass + ' 通过 / ' + fails.length + ' 失败')
 if (fails.length) { console.log('失败项:'); fails.forEach((f) => console.log('  - ' + f)) }

@@ -1569,8 +1569,27 @@ function attachInteraction() {
   document.addEventListener('pointermove', onPointerMove, true)
   document.addEventListener('pointerdown', onPointerDown, true)
   document.addEventListener('contextmenu', onContextMenu, true)
+  // 隐藏后的第二条退路：Ctrl+Shift+H 随时切换显示 / 隐藏。
+  // 它必须挂在 document 上、且**不看桌宠是否可见** —— 存在的意义正是桌宠不可见时。
+  document.addEventListener('keydown', onHideHotkey, true)
 
   window.addEventListener('resize', onResize)
+}
+
+// Ctrl+Shift+H：显示 / 隐藏桌宠。隐藏之后页面里没有任何可点的东西了，
+// 这条热键是唯一「安静」的恢复方式（不必右键、不必知道菜单在哪）。
+function onHideHotkey(e) {
+  if (destroyed) return
+  if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return
+  var k = String(e.key || '').toLowerCase()
+  if (k !== 'h' && e.code !== 'KeyH') return
+  // 正在输入框里打字时不要抢键（自定义尺寸 / 备注 / 节假日粘贴面板等都用 input）
+  var t = e.target
+  var tag = (t && t.tagName) ? String(t.tagName).toLowerCase() : ''
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return
+  e.preventDefault()
+  e.stopPropagation()
+  setHidden(!state.hidden)
 }
 
 function localPoint(e) {
@@ -1656,12 +1675,17 @@ function onBowlDragEnd(e) {
 // ============================================================================
 
 function onPointerDown(e) {
-  if (destroyed || !container || state.hidden) return
+  if (destroyed || !container) return
   // 点在菜单上：**完全放行** —— 既不关菜单，也不触发拖动。
   // 曾经的写法是 `if (menuEl.sub) hideMenu()`：pointerdown 先于 click，菜单在
   // mousedown→mouseup 之间被 display:none 掉，元素不再渲染 ⇒ click 永远不派发，
   // 于是所有**子菜单项**（切换角色 / 尺寸 / 刷新间隔 / 演示连续扣费）全部点不动。
   if (isInMenu(e.target)) return
+  // 隐藏状态下没有桌宠可点，但**恢复菜单**要能靠点空白处关掉
+  if (state.hidden) {
+    if (menuOpen()) hideMenu()
+    return
+  }
 
   // 米饭盆与铁锅**活动在整个窗口里**，所以必须在「是否落在挂件盒子里」之前判定，
   // 而且用的是**视口坐标**（e.clientX/Y），不是画布局部坐标。
@@ -1751,7 +1775,18 @@ function onDragEnd() {
 }
 
 function onContextMenu(e) {
-  if (destroyed || !container || state.hidden) return
+  if (destroyed || !container) return
+  // 【隐藏后的自救路径】桌宠已经 display:none，像素命中无从谈起，所以必须在
+  // 「命中角色」之前处理。原来的写法是 `if (... || state.hidden) return` —— 直接返回，
+  // 而「显示桌宠」只存在于桌宠自己的菜单里 ⇒ 隐藏 = 不可逆（真 bug，只能改 localStorage）。
+  if (state.hidden) {
+    if (isInMenu(e.target)) { e.preventDefault(); return }
+    e.preventDefault()
+    menuPos.x = e.clientX
+    menuPos.y = e.clientY
+    showMenu(e.clientX, e.clientY, recoverMenu)
+    return
+  }
   if (isInMenu(e.target)) { e.preventDefault(); return } // 菜单上再右键：只吞掉默认菜单
   var p = localPoint(e)
   var inside = p.x >= 0 && p.y >= 0 && p.x <= W && p.y <= H
@@ -2095,10 +2130,24 @@ function mainMenu() {
       ]
     } },
     { label: '吸附回左下角', run: function () { snapToCorner() } },
-    { label: state.hidden ? '显示桌宠' : '隐藏桌宠', run: function () { setHidden(!state.hidden) } },
+    // 隐藏前就把恢复方式写在菜单上 —— 否则用户点完「隐藏桌宠」才知道自己进了死胡同
+    { label: state.hidden ? '显示桌宠' : '隐藏桌宠　（Ctrl+Shift+H 可恢复）', run: function () { setHidden(!state.hidden) } },
     { label: '关于…', run: function () { showAbout() } },
   ]
   return items
+}
+
+// 「隐藏」之后的恢复菜单。
+//
+// 为什么需要它：桌宠一旦 display:none，它自己的右键菜单就再也没有机会被打开 ——
+// 而「显示桌宠」原来**只**存在于那个菜单里，于是隐藏成了不可逆的单程票。
+// 所以隐藏之后改由「页面任意位置右键」唤出这个最小菜单。
+function recoverMenu() {
+  return [
+    { label: '👁 显示桌宠', run: function () { setHidden(false) } },
+    { label: '（Ctrl+Shift+H 也能切换）', disabled: true },
+    { label: '关于…', run: function () { showAbout() } },
+  ]
 }
 
 function playDemo(times) {
@@ -3025,10 +3074,18 @@ function buildDom() {
 }
 
 function setHidden(h) {
+  var wasHidden = state.hidden
   state.hidden = !!h
   saveState()
   if (container) container.style.display = state.hidden ? 'none' : 'block'
   if (menuEl.root) menuEl.root.style.display = 'none'
+  // 恢复显示时要把位置与画面重新拾起来：隐藏期间帧循环可能已经停了，
+  // 只把 display 设回 block 会留下一个空白盒子（旧实现就有这个隐患）。
+  if (wasHidden && !state.hidden && container) {
+    place()
+    draw()
+    wake()
+  }
 }
 
 function refreshAssets() {
