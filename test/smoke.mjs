@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const SRC = fs.readFileSync(path.join(here, '..', 'assets', 'pet.js'), 'utf8')
+// 余额桩：测试可以改这个值，再等自动轮询，验证真实扣费 / 充值路径。
+let balanceYuan = 12.34
 
 // ---------------------------------------------------------------- 断言 -----
 let pass = 0
@@ -62,7 +64,13 @@ class El {
     for (const f of (this._h[type] || []).slice()) { try { f.call(this, ev) } catch (e) { runtimeErrors.push(String(e && e.message || e)) } }
     return ev
   }
-  getBoundingClientRect() { return { width: 200, height: 260, left: 10, top: 10, right: 210, bottom: 270 } }
+  getBoundingClientRect() {
+    // 用元素自己的 left/top（插件会把容器真实位置写进 style）。
+    // 固定 10/10 会让 localPoint 在桌宠被拖到别处后算错，摸头/右键命中都会假失败。
+    const left = this.style && this.style.left !== undefined && this.style.left !== '' ? (parseFloat(this.style.left) || 0) : 10
+    const top = this.style && this.style.top !== undefined && this.style.top !== '' ? (parseFloat(this.style.top) || 0) : 10
+    return { width: 200, height: 260, left, top, right: left + 200, bottom: top + 260 }
+  }
   focus() {} select() {} blur() {}
   getContext() {
     // 建掩码用的离屏 canvas 会**先设好 width/height 再取 context**；
@@ -137,6 +145,7 @@ const EXPR_OK = []      // 加载成功的表情图
 const ALL_IMG = []      // 所有被请求的图片 src
 const DRAWS = []        // 每帧 drawImage 的参数（用来观察盆的位置）
 const AUDIO_PLAYED = []  // 实际被 play() 的音效源（观察音效）
+const AUDIO_VOLUMES = [] // 每次 play() 时的音量（观察独立音量）
 const LOGS = []         // 插件内部 console 输出（调试用）
 const TEXTS = []        // 被 fillText 画出的文字（雷达名牌读数）
 const ARCS = []         // 被 arc 画出的圆（雷达方向环）
@@ -215,7 +224,11 @@ function makeEnv() {
     else if (u.includes('sources.json')) body = sources
     else if (u.includes('turn.json')) body = { ok: true, seq: 0 }
     else if (u.includes('ledger.json')) body = { ok: true, enabled: true, since: null, models: {}, total: 0 }
-    else if (u.includes('balance.json')) body = { ok: true, source: 'deepseek', kind: 'balance', currency: 'CNY', totalBalance: 12.34, at: Date.now() }
+    else if (u.includes('balance.json')) body = { ok: true, source: 'deepseek', kind: 'balance', currency: 'CNY', totalBalance: balanceYuan, at: Date.now() }
+    else if (u.includes('tariff.json')) body = {
+      ok: true, peak: true, label: '梁文峰', nextLabel: '距谷时',
+      nextAt: Math.floor(Date.now() / 1000) + 3661, remainSec: 3661,
+    }
     else if (u.includes('holidays.json')) body = { ok: true, status: 'ok', holidays: [] }
     return Promise.resolve({
       ok: true, status: 200, headers: { get: () => null },
@@ -265,7 +278,7 @@ function makeEnv() {
       }
       // 记录 **play()** 而不是构造：插件把音效对象缓存复用（`if (!feedSound) ...`），
       // 所以「又响了一次」并不会再 new 一个 Audio。测构造会漏掉后续每一次播放。
-      play() { AUDIO_PLAYED.push(this.src); return Promise.resolve() }
+      play() { AUDIO_PLAYED.push(this.src); AUDIO_VOLUMES.push({ src: this.src, volume: this.volume }); return Promise.resolve() }
       pause() {}
     },
     MutationObserver: class { constructor() {} observe() {} disconnect() {} },
@@ -310,7 +323,7 @@ async function advance(seconds) {
 function rowsOf(menuRoot) { return menuRoot.children.filter((c) => c.className === 'dshpet-mi') }
 function rowBy(menuRoot, text) { return rowsOf(menuRoot).filter((r) => r.textContent.includes(text))[0] || null }
 function click(el) {
-  if (!el) { runtimeErrors.push('click on missing element'); return }
+  if (!el) { runtimeErrors.push('click on missing element' + (new Error().stack || '').split('\n').slice(2, 4).join(' @ ')); return }
   el.fire('click', {})
 }
 
@@ -325,9 +338,19 @@ const menuRoot = (byId['dshpet-menu']) || doc.body.children.filter((c) => c.id =
 ok('菜单容器已创建', !!menuRoot)
 
 async function openMenu() {
-  // 容器桩的 rect 是 left:10/top:10。点到哪一格取决于当前尺寸（自定义尺寸会把角色撑大），
-  // 所以依次试几个纵向位置，哪个能弹出菜单就用哪个。
-  var pts = [[122, 173], [122, 130], [122, 210], [122, 90], [122, 250]]
+  // 清掉上一次展开后残留在 DOM 里的行（display:none 时 children 还在），
+  // 否则右键没命中时会把旧子菜单误当成主菜单。
+  menuRoot.style.display = 'none'
+  menuRoot.innerHTML = ''
+  // 用**立绘实际所在的视口位置**右键，而不是固定坐标：桌宠被拖走 / 吸附到右下角后，
+  // 固定点会落在空白处（旧版测试靠容器桩固定 10/10 才碰巧成立）。
+  const pr = petRect()
+  const rootNow = doc.body.children.filter((c) => c.id === 'dshpet-root')[0]
+  const lx = rootNow ? (parseFloat(rootNow.style.left) || 0) : 0
+  const ly = rootNow ? (parseFloat(rootNow.style.top) || 0) : 0
+  var pts = pr
+    ? [[pr.x + pr.w * 0.5, pr.y + pr.h * 0.62], [pr.x + pr.w * 0.5, pr.y + pr.h * 0.78]]
+    : [[lx + 80, ly + 120], [lx + 80, ly + 90], [lx + 40, ly + 120]]
   for (var i = 0; i < pts.length; i++) {
     doc.fire('contextmenu', { button: 2, clientX: pts[i][0], clientY: pts[i][1] })
     await flush(6)
@@ -408,6 +431,190 @@ await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
 ok('选 75% 后打勾落在 75%', rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 75 %')), rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
 ok('选 75% 后「开启声音」恢复打勾', rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 开启声音')))
 
+console.log('')
+console.log('=== 每个音效独立音量 / 自定义音效 ===')
+await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
+const sound2 = rowsOf(menuRoot).map((r) => r.textContent)
+ok('声音菜单有 6 个独立音效', ['受击（扣费）', '投喂米饭盆', '铁锅扣头', '取下铁锅', '回合结束喜报', '结算证书']
+  .every((s) => sound2.some((r) => r.includes(s))), sound2.join(' | '))
+click(rowBy(menuRoot, '受击（扣费）')); await flush(6)
+const hitMenu = rowsOf(menuRoot).map((r) => r.textContent)
+ok('单个音效菜单有音量档位 / 自定义 / 上传', hitMenu.some((r) => r.includes('25 %')) &&
+  hitMenu.some((r) => r.includes('自定义音量')) && hitMenu.some((r) => r.includes('上传自定义音效')) &&
+  hitMenu.some((r) => r.includes('恢复出厂音效')), hitMenu.join(' | '))
+ok('默认显示当前是出厂音效', hitMenu.some((r) => r.includes('当前：出厂音效')), hitMenu.join(' | '))
+click(rowBy(menuRoot, '25 %')); await flush(6)
+await openMenu(); click(rowBy(menuRoot, '测试一次扣费')); await advance(0.1)
+const hitPlays = AUDIO_VOLUMES.filter((x) => x.src.includes('hit.mp3'))
+ok('受击音效按自己的 25% 音量播放', hitPlays.length > 0 && Math.abs(hitPlays[hitPlays.length - 1].volume - 0.25) < 1e-9,
+  hitPlays.length ? String(hitPlays[hitPlays.length - 1].volume) : '(无播放)')
+// 还原 80%
+await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
+click(rowBy(menuRoot, '受击（扣费）')); await flush(6)
+click(rowBy(menuRoot, '75 %')); await flush(6)
+
+console.log('')
+console.log('=== 平板峰谷彩蛋（DSH 账户余额）===')
+const tp = tabletPoint()
+TEXTS.length = 0
+if (tp) {
+  doc.fire('pointerdown', { button: 0, clientX: tp.x, clientY: tp.y })
+  win.fire('pointerup', { clientX: tp.x, clientY: tp.y })
+  await flush(8)
+  await advance(0.1)
+}
+ok('平板标题已改为「DSH 账户余额」', TEXTS.some((t) => t.text === 'DSH 账户余额'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+ok('点击平板切换到梁文峰', TEXTS.some((t) => t.text === '梁文峰'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+ok('峰谷彩蛋带剩余时长', TEXTS.some((t) => /^距谷时 \d+:\d{2}:\d{2}$/.test(t.text)),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+// 再点一下切回余额
+TEXTS.length = 0
+if (tp) {
+  doc.fire('pointerdown', { button: 0, clientX: tp.x, clientY: tp.y })
+  win.fire('pointerup', { clientX: tp.x, clientY: tp.y })
+  await flush(8)
+  await advance(0.1)
+}
+ok('再点平板切回余额', !TEXTS.some((t) => t.text === '梁文峰') && TEXTS.some((t) => t.text === '12.34'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+
+console.log('')
+console.log('=== 自定义扣费步长 ===')
+await openMenu()
+ok('菜单有「扣费步长」', !!rowBy(menuRoot, '扣费步长'))
+ok('默认每 0.01 元提示一次', rowBy(menuRoot, '扣费步长').textContent.includes('0.01 元'))
+click(rowBy(menuRoot, '扣费步长')); await flush(6)
+const stepRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('步长有 0.01 / 0.05 / 0.10 / 0.50 / 1.00 五档',
+  ['¥0.01', '¥0.05', '¥0.10', '¥0.50', '¥1.00'].every((s) => stepRows.some((r) => r.includes(s))), stepRows.join(' | '))
+ok('有「自定义步长…」', !!rowBy(menuRoot, '自定义步长'))
+click(rowBy(menuRoot, '¥0.10')); await flush(6)
+await openMenu()
+ok('选 0.10 后菜单标题跟着变', rowBy(menuRoot, '扣费步长').textContent.includes('0.10 元'),
+  rowBy(menuRoot, '扣费步长').textContent)
+
+// 一次测试扣费按一个步长提示
+TEXTS.length = 0
+AUDIO_PLAYED.length = 0
+click(rowBy(menuRoot, '测试一次扣费')); await advance(0.1)
+ok('测试扣费飘字是步长金额（-0.10）', TEXTS.some((t) => t.text === '-0.10'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+ok('测试扣费同时播放 hit.mp3', AUDIO_PLAYED.some((s) => s.includes('hit.mp3')), AUDIO_PLAYED.join(','))
+ok('平板金额按步长递减（12.34 → 12.24）', TEXTS.some((t) => t.text === '12.24'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+
+// 自定义步长：0.02
+await openMenu(); click(rowBy(menuRoot, '扣费步长')); await flush(6)
+click(rowBy(menuRoot, '自定义步长')); await flush(6)
+const stepPrompt = doc.body.children.filter((c) => c.id === 'dshpet-prompt')[0]
+const stepBox = stepPrompt && stepPrompt.children[0]
+const stepInp = stepBox && stepBox.children.filter((c) => c.className === 'dshpet-prompt-row')[0].children[0]
+const stepMsg = stepBox && stepBox.children.filter((c) => c.className.indexOf('dshpet-hol-msg') === 0)[0]
+const stepOk = stepBox && stepBox.children.filter((c) => c.className.indexOf('dshpet-hol-actions') >= 0)[0].children[0]
+stepInp.value = '0'
+click(stepOk); await flush(4)
+ok('步长 0 被拒绝', !!stepMsg.textContent && doc.body.children.some((c) => c.id === 'dshpet-prompt'), stepMsg.textContent)
+stepInp.value = '0.001'
+click(stepOk); await flush(4)
+ok('小于 0.01 元的步长被拒绝', !!stepMsg.textContent && /0\.01/.test(stepMsg.textContent), stepMsg.textContent)
+stepInp.value = '0.02'
+click(stepOk); await flush(4)
+await openMenu()
+ok('自定义步长 0.02 生效', rowBy(menuRoot, '扣费步长').textContent.includes('0.02 元'),
+  rowBy(menuRoot, '扣费步长').textContent)
+
+// 连续演示 10 次 = 0.20 元，飘字每拍一次
+TEXTS.length = 0
+click(rowBy(menuRoot, '演示连续扣费')); await flush(6)
+click(rowBy(menuRoot, '扣 10 次')); await advance(2.0)
+const stepFloats = [...new Set(TEXTS.filter((t) => t.text === '-0.02').map((t) => t.text))]
+ok('连续演示按步长逐次飘字（-0.02）', stepFloats.length === 1 && TEXTS.filter((t) => t.text === '-0.02').length >= 6,
+  TEXTS.filter((t) => t.text === '-0.02').length + ' 条')
+
+// 还原成 0.01，避免影响后面的用例
+await openMenu(); click(rowBy(menuRoot, '扣费步长')); await flush(6)
+click(rowBy(menuRoot, '¥0.01')); await flush(6)
+
+console.log('')
+console.log('=== 功能开关（掉盆 / 摸头 / 受击动画）===')
+await openMenu()
+click(rowBy(menuRoot, '功能选择')); await flush(6)
+const fxRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('功能开关有三项', ['充值后掉落米饭盆', '鼠标抚摸会开心', '扣费时播放音效与动画'].every((s) => fxRows.some((r) => r.includes(s))), fxRows.join(' | '))
+click(rowBy(menuRoot, '扣费时播放音效与动画')); await flush(6)
+await openMenu(); click(rowBy(menuRoot, '功能选择')); await flush(6)
+ok('关掉扣费动画后不再打勾', !rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 扣费时播放音效与动画')),
+  rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+TEXTS.length = 0
+AUDIO_PLAYED.length = 0
+await openMenu(); click(rowBy(menuRoot, '测试一次扣费')); await advance(0.1)
+ok('关掉扣费动画后不飘字、不响', !TEXTS.some((t) => /^-0\.0\d$/.test(t.text)) && !AUDIO_PLAYED.some((s) => s.includes('hit.mp3')),
+  TEXTS.map((t) => t.text).join(' | ') + ' / ' + AUDIO_PLAYED.join(','))
+await openMenu(); click(rowBy(menuRoot, '功能选择')); await flush(6)
+click(rowBy(menuRoot, '扣费时播放音效与动画')); await flush(6)   // 还原
+
+// 掉盆关掉时，测试充值不再生成米饭盆
+await openMenu(); click(rowBy(menuRoot, '功能选择')); await flush(6)
+click(rowBy(menuRoot, '充值后掉落米饭盆')); await flush(6)
+await openMenu(); click(rowBy(menuRoot, '测试充值')); await flush(4)
+click(rowBy(menuRoot, '¥3.00'))
+DRAWS.length = 0
+await advance(0.2)
+ok('关掉掉盆后测试充值不生成米饭盆', !DRAWS.some((d) => d.src.includes('rice.png')),
+  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+await openMenu(); click(rowBy(menuRoot, '功能选择')); await flush(6)
+click(rowBy(menuRoot, '充值后掉落米饭盆')); await flush(6)   // 还原
+
+console.log('')
+console.log('=== 左右下角吸附 ===')
+await openMenu(); click(rowBy(menuRoot, '松手吸附')); await flush(6)
+const snapRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('吸附菜单有左下 / 右下 / 关闭三项', snapRows.some((r) => r.includes('左下角')) && snapRows.some((r) => r.includes('右下角')) && snapRows.some((r) => r.includes('关闭')),
+  snapRows.join(' | '))
+click(rowBy(menuRoot, '吸附到右下角')); await advance(0.3)
+const rootSnap = doc.body.children.filter((c) => c.id === 'dshpet-root')[0]
+ok('选右下角后真的吸附过去', parseFloat(rootSnap.style.left) > win.innerWidth * 0.5,
+  'left=' + rootSnap.style.left)
+// 关闭吸附后松手不再自动回角
+await openMenu(); click(rowBy(menuRoot, '松手吸附')); await flush(6)
+click(rowBy(menuRoot, '关闭')); await flush(6)
+await openMenu(); click(rowBy(menuRoot, '松手吸附')); await flush(6)
+const snapOffRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('关闭吸附后不再勾选左 / 右下角', snapOffRows.some((r) => r.includes('✓ 关闭')) &&
+  !snapOffRows.some((r) => r.includes('✓ 吸附到左') || r.includes('✓ 吸附到右')), snapOffRows.join(' | '))
+await openMenu(); click(rowBy(menuRoot, '松手吸附')); await flush(6)
+click(rowBy(menuRoot, '吸附到左下角')); await advance(0.3)
+
+console.log('')
+console.log('=== 摸头手势（petpet 手部动画）===')
+await advance(1.2)                  // 清掉点击造成的摸头封锁
+const prPat = petRect()
+DRAWS.length = 0
+if (prPat) {
+  // 在她身上来回划动：每帧都派发 pointermove
+  for (let i = 0; i < 40; i++) {
+    doc.fire('pointermove', {
+      buttons: 0,
+      clientX: prPat.x + prPat.w * (i % 2 ? 0.55 : 0.35),
+      clientY: prPat.y + prPat.h * 0.72,
+    })
+    await advance(0.03)
+  }
+  await advance(0.1)
+}
+ok('摸头后画出手部素材', DRAWS.some((d) => d.src.includes('/pat/pat_hand_')),
+  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+ok('摸头时是开心表情（expression_11）', DRAWS.some((d) => d.src.includes('expression_11')),
+  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+// 指针离开后手要收起
+doc.fire('pointermove', { buttons: 0, clientX: 5, clientY: 5 })
+await advance(0.4)
+DRAWS.length = 0
+await oneFrame()
+ok('指针离开后手部动画收起', !DRAWS.some((d) => d.src.includes('/pat/pat_hand_')),
+  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
 console.log('')
 console.log('=== 回归：原有功能没被改坏 ===')
 await openMenu()
@@ -532,8 +739,20 @@ function petRect() {
   const d = DRAWS.filter((x) => x.src.includes('/sprite/') || x.src.includes('/expr/')).slice(-1)[0]
   return d ? { x: px + d.x, y: py + d.y, w: d.w, h: d.h } : null
 }
-function spawnOne() {
-  return openMenu().then(() => { click(rowBy(menuRoot, '测试充值')) })
+// 鱼立绘平板四角 TL(1060,699) TR(1413,644) BL(1090,889) 的中心（按 1536 宽缩放）
+function tabletPoint() {
+  const pr = petRect()
+  if (!pr) return null
+  const s = pr.w / 1536
+  return { x: pr.x + 1251.5 * s, y: pr.y + 766.5 * s }
+}
+function spawnOne(amountLabel) {
+  return openMenu().then(() => {
+    click(rowBy(menuRoot, '测试充值'))
+    return flush(2)
+  }).then(() => {
+    click(rowBy(menuRoot, amountLabel || '¥3.00'))
+  })
 }
 // 拖盆：pointerdown 落在 document（捕获阶段），pointermove/up 落在 window
 // （插件就是在 window 上挂的拖动监听，必须按真实链路派发）
@@ -567,8 +786,8 @@ async function eatAllBowls() {
 ok('存在窗口级覆盖层 #dshpet-rice', doc.body.children.some((c) => c.id === 'dshpet-rice'))
 
 // ① 掉盆 + 重力
-DRAWS.length = 0
 await spawnOne()
+DRAWS.length = 0
 await advance(0.15)
 const ys = DRAWS.filter((d) => d.src.includes('rice.png')).map((d) => d.y)
 ok('掉下来一个米饭盆（有画 rice.png）', ys.length > 0, ys.length + ' 帧')
@@ -655,16 +874,19 @@ if (potDraw && sprDraw) {
 }
 
 // ⑦ 双击她的头 → 把铁锅敲掉（上游是**双击**，不是单击）
+// 现在支持堆叠：一次只取最上面那口锅，所以连点几次把所有锅都取下来。
 const pr1 = petRect()
 if (pr1) {
   const hx = pr1.x + pr1.w * 0.68, hy = pr1.y + pr1.h * 0.06
-  // 真实双击 = down/up + down/up
-  for (let n = 0; n < 2; n++) {
-    doc.fire('pointerdown', { button: 0, clientX: hx, clientY: hy })
-    win.fire('pointerup', { clientX: hx, clientY: hy })
+  for (let round = 0; round < 6; round++) {
+    // 真实双击 = down/up + down/up
+    for (let n = 0; n < 2; n++) {
+      doc.fire('pointerdown', { button: 0, clientX: hx, clientY: hy })
+      win.fire('pointerup', { clientX: hx, clientY: hy })
+    }
+    await flush(4)
+    await advance(0.8)     // 铁锅是渐隐消失的
   }
-  await flush(4)
-  await advance(1.5)     // 铁锅是渐隐消失的
 }
 DRAWS.length = 0
 await oneFrame()
@@ -736,9 +958,84 @@ const radarRow = rowBy(menuRoot, '打开火控雷达')
 ok('菜单有「打开火控雷达」', !!radarRow)
 if (radarRow) { click(radarRow); await flush(6) }
 await openMenu()
-click(rowBy(menuRoot, '打开火控雷达'))   // 关掉，避免影响后续
+const radarRow2 = rowBy(menuRoot, '打开火控雷达')
+if (radarRow2) click(radarRow2)   // 关掉，避免影响后续
 await flush(6)
 ok('开关火控雷达不报错', runtimeErrors.length === 0, runtimeErrors.slice(0, 2).join(' | '))
+
+console.log('')
+console.log('=== 自定义演示次数 / 测试充值金额 ===')
+// 演示次数
+await openMenu(); click(rowBy(menuRoot, '演示连续扣费')); await flush(6)
+click(rowBy(menuRoot, '自定义次数')); await flush(6)
+const demoPrompt = doc.body.children.filter((c) => c.id === 'dshpet-prompt')[0]
+const demoBox = demoPrompt && demoPrompt.children[0]
+const demoInp = demoBox && demoBox.children.filter((c) => c.className === 'dshpet-prompt-row')[0].children[0]
+const demoMsg = demoBox && demoBox.children.filter((c) => c.className.indexOf('dshpet-hol-msg') === 0)[0]
+const demoOk = demoBox && demoBox.children.filter((c) => c.className.indexOf('dshpet-hol-actions') >= 0)[0].children[0]
+ok('演示次数弹层已打开', !!demoPrompt)
+demoInp.value = '0'
+click(demoOk); await flush(4)
+ok('演示次数 0 被拒绝', !!demoMsg.textContent, demoMsg.textContent)
+demoInp.value = '3'
+click(demoOk); await flush(4)
+ok('自定义演示 3 次被接受', !doc.body.children.some((c) => c.id === 'dshpet-prompt'))
+TEXTS.length = 0
+await advance(1.0)
+ok('自定义演示真的跑了 3 拍', TEXTS.filter((t) => t.text === '-0.01').length >= 3,
+  TEXTS.filter((t) => t.text === '-0.01').length + ' 条飘字')
+await advance(1.0)   // 等演示结束、显示恢复
+
+// 测试充值金额
+await openMenu(); click(rowBy(menuRoot, '测试充值')); await flush(6)
+click(rowBy(menuRoot, '自定义金额')); await flush(6)
+const topPrompt = doc.body.children.filter((c) => c.id === 'dshpet-prompt')[0]
+const topBox = topPrompt && topPrompt.children[0]
+const topInp = topBox && topBox.children.filter((c) => c.className === 'dshpet-prompt-row')[0].children[0]
+const topMsg = topBox && topBox.children.filter((c) => c.className.indexOf('dshpet-hol-msg') === 0)[0]
+const topOk = topBox && topBox.children.filter((c) => c.className.indexOf('dshpet-hol-actions') >= 0)[0].children[0]
+ok('测试充值金额弹层已打开', !!topPrompt)
+topInp.value = '0'
+click(topOk); await flush(4)
+ok('测试充值 0 元被拒绝', !!topMsg.textContent, topMsg.textContent)
+topInp.value = '7'
+click(topOk); await flush(4)
+DRAWS.length = 0
+await advance(0.2)
+ok('自定义测试充值掉下米饭盆', DRAWS.some((d) => d.src.includes('rice.png')))
+await eatAllBowls()
+
+console.log('')
+console.log('=== 零余额冷脸 / 真实扣费按步长拆分 ===')
+// 零余额 → 冷脸（expression_12）
+balanceYuan = 0
+await openMenu(); click(rowBy(menuRoot, '立即刷新余额'))
+DRAWS.length = 0
+await advance(0.3)
+ok('余额归零切到冷脸（expression_12）', DRAWS.some((d) => d.src.includes('expression_12')),
+  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+// 恢复到 12.34，让后续用例有正常余额
+balanceYuan = 12.34
+await openMenu(); click(rowBy(menuRoot, '立即刷新余额')); await advance(0.4)
+await eatAllBowls()
+
+// 步长 0.10：真实下降 0.30 应当分 3 次提示，每次 -0.10
+await openMenu(); click(rowBy(menuRoot, '扣费步长')); await flush(6)
+click(rowBy(menuRoot, '¥0.10')); await flush(6)
+balanceYuan = 12.04
+await openMenu(); click(rowBy(menuRoot, '立即刷新余额'))
+let maxFloats = 0
+for (let i = 0; i < 24; i++) {
+  TEXTS.length = 0
+  await advance(0.1)
+  maxFloats = Math.max(maxFloats, TEXTS.filter((t) => t.text === '-0.10').length)
+}
+ok('真实扣 0.30 按 0.10 拆成多次提示', maxFloats >= 3, '同一帧最多 ' + maxFloats + ' 条 -0.10')
+ok('平板显示对齐到 12.04', TEXTS.some((t) => t.text === '12.04'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+// 还原 0.01
+await openMenu(); click(rowBy(menuRoot, '扣费步长')); await flush(6)
+click(rowBy(menuRoot, '¥0.01')); await flush(6)
 
 console.log('')
 console.log('=== 关于（含上游版本说明）===')

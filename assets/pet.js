@@ -17,11 +17,44 @@ var PREFIX = '/dsh-pet'
 
 // —— 原版常量（PetModel / PetView / PetLayout）——
 var HIT_DURATION = 0.55      // shakeTime / flashTime 初值
-var STEP_INTERVAL = 0.2      // 每 0.01 元的节拍
+var STEP_INTERVAL = 0.2      // 每「一个扣费步长」的节拍
 var FLOAT_LIFE = 0.95        // 飘字寿命
 var TOPUP_DURATION = 0.9     // 充值光环时长
-var MAX_PENDING_STEPS = 400  // 超过直接对齐，不放积压动画
+var MAX_PENDING_CUES = 400   // 积压超过这么多「步」就直接对齐，不放积压动画
 var MAX_DEMO_STEPS = 200
+
+// —— 金额单位 ——
+// 余额来源下发的是元（浮点）。为了支持任意扣费步长（可以小于 1 分，例如 0.001），
+// 内部统一用**万分之一元**的整数记账，避免 0.1 + 0.2 这类浮点误差滚进动画。
+// 显示仍按 2 位小数；只有步长或飘字需要时才显示 3~4 位。
+var MONEY_UNITS = 10000
+var DEFAULT_STEP = 0.01
+var STEP_PRESETS = [0.01, 0.05, 0.1, 0.5, 1]
+function toUnits(yuan) {
+  var n = Number(yuan)
+  return isFinite(n) ? Math.round(n * MONEY_UNITS) : NaN
+}
+function fromUnits(u) { return u / MONEY_UNITS }
+function clampStep(yuan) {
+  var n = Number(yuan)
+  if (!isFinite(n)) return DEFAULT_STEP
+  // 余额显示精度回到 0.01 元：步长最小 1 分，并且只保留两位小数。
+  n = Math.round(n * 100) / 100
+  if (n < 0.01) n = DEFAULT_STEP
+  if (n > 100) n = 100
+  return n
+}
+function stepUnits() { return Math.max(100, toUnits(state.stepYuan)) }
+// 金额显示：统一到 0.01 元（两位小数）。内部仍用万分之一元整数记账。
+function moneyString(units) {
+  if (units === null || units === undefined || !isFinite(units)) return '--'
+  var neg = units < 0
+  var cents = Math.round(Math.abs(Math.round(units)) / 100)
+  var whole = Math.floor(cents / 100)
+  var frac = cents % 100
+  return (neg ? '-' : '') + whole + '.' + (frac < 10 ? '0' : '') + frac
+}
+function stepLabel() { return moneyString(stepUnits()) }
 var DEMO_RESTORE = 0.55      // 演示结束后停留时间
 var ALPHA_MIN = 8 / 255      // 命中阈值（原版 alphaComponent > 8.0/255.0）
 var MASK_W = 384, MASK_H = 256   // 命中掩码分辨率（原图 1/4）
@@ -71,9 +104,43 @@ var bowlWait = 0
 var exprBowlAlive = false    // 场上有未接的米饭盆
 var exprBowlLocked = false   // 盆已被锁定（正在被吸走）
 var exprPotOnHead = false    // 铁锅扣在头上
+
+// ============================================================================
+// 摸头手势（来自上游 VK-1 v3「petpet」）
+// ============================================================================
+// 规则与上游一致：指针在**她身上**持续划动，累计走过 PAT_MOVE_MIN_PX、
+// 且持续 PAT_START_DELAY_MS 之后才算摸头；不是「停在她身上」也不是「点一下」。
+// 按键按下（拖动 / 拿盆 / 右键菜单）一律打断并短暂封锁，避免和拖拽打架。
+var PAT_FILES = ['pat_hand_0.png', 'pat_hand_1.png', 'pat_hand_2.png', 'pat_hand_3.png', 'pat_hand_4.png']
+var PAT_FRAME_MS = 40          // 上游 PAT_FRAME_MS
+var PAT_MOVE_MIN_PX = 24       // 划动累计距离阈值
+var PAT_START_DELAY_MS = 500   // 达到距离后还要持续多久
+var PAT_END_DELAY_MS = 150     // 停顿多久算结束
+var PAT_SETTLE_MS = 1000       // 拖动 / 吸附结束后多久内不许摸
+var PAT_MOVE_MAX_STEP = 120    // 单帧位移超过这个值视为指针跳跃，不计入
+var PAT_MOVE_DECAY = 0.12      // 停顿时累计距离的衰减（px/ms）
+// 手掌在每一帧里的位置（上游 PatPalmX / PatPalmY）—— 掌心要落在她头顶
+var PAT_PALM_X = [0.319, 0.356, 0.318, 0.425, 0.298]
+var PAT_PALM_Y = [0.511, 0.720, 0.835, 0.744, 0.608]
+var PAT_PALM_BIAS_X = 0.393
+var PAT_PALM_BIAS_Y = -0.206
+var PAT_REF_SCALE = 446 / 107
+var patImages = []
+var patReady = false
+var patActive = false
+var patT = 0                   // ms into the current cycle
+var patAccum = 0               // 已累计的划动距离
+var patMoveMs = 0              // 达到阈值后持续的时间
+var patIdleMs = 0
+var patLastX = 0, patLastY = 0, patSeen = false
+var patMoved = false
+var patBlocked = false
+var patBlockMs = 0
+var patWaitingPotOff = false
+var patPointerOn = false
+var patHeartT = 0
 var POLL_OPTIONS = [10, 30, 60, 300]
 var SOUND_POOL = 4
-var SOUND_VOLUME = 0.7
 
 // 平板文字（原版 PetView 的 panelHeight 比例）
 var PANEL_TITLE_RATIO = 0.21     // "DSH 余额" 字号
@@ -111,6 +178,16 @@ var CERT_BODY_DROP = 0.022
 var C_CERT_INK = '#000'          // 结算正文墨色（黑）
 
 var STORE_KEY = 'dshBalancePet.state.v1'
+// 六个音效槽：受击 / 投喂 / 铁锅扣头 / 取锅 / 回合结束 / 结算
+var CUE_IDS = ['hit', 'feed', 'land', 'off', 'turn', 'settle']
+var CUE_LABELS = {
+  hit: '受击（扣费）',
+  feed: '投喂米饭盆',
+  land: '铁锅扣头',
+  off: '取下铁锅',
+  turn: '回合结束喜报',
+  settle: '结算证书',
+}
 
 // —— 持久化状态 ——
 var state = {
@@ -118,12 +195,21 @@ var state = {
   sizeIndex: 1,
   sizePx: 0,           // >0 表示用了「自定义尺寸」，此时忽略 sizeIndex
   soundOn: true,
-  volume: 80,          // 0..100（上游默认 80）；0 = 静音
+  volume: 80,          // 旧版总音量：同时作为所有音效的初始值
+  // 每个音效自己的音量 0..100；缺省 = volume
+  cueVolume: { hit: 80, feed: 80, land: 80, off: 80, turn: 80, settle: 80 },
+  // 每个音效的自定义文件元信息（真正的 Blob 在 IndexedDB 里）
+  cueCustom: {},
   theme: 'light',      // 菜单配色：light | dark
   snapOnRelease: true,
+  snapCorner: 'left',  // 松手吸附到左下角 left / 右下角 right
   pollSeconds: 30,
   hidden: false,
   source: 'deepseek',   // 平板显示哪个 API 的余额（右键菜单可切）
+  stepYuan: DEFAULT_STEP, // 每扣多少钱提示一次（最小 0.01 元）
+  fxBowlDrop: true,     // 充值后掉米饭盆，手动拖取
+  fxPat: true,          // 鼠标抚摸会开心
+  fxHurt: true,         // 扣费时播放音效与动画
   x: null,
   y: null,
 }
@@ -139,11 +225,38 @@ function loadState() {
     if (typeof o.soundOn === 'boolean') state.soundOn = o.soundOn
     if (typeof o.volume === 'number' && isFinite(o.volume)) {
       state.volume = Math.max(0, Math.min(100, Math.round(o.volume)))
+      // 旧状态没有 cueVolume：用总音量补齐
+      for (var ci = 0; ci < CUE_IDS.length; ci++) state.cueVolume[CUE_IDS[ci]] = state.volume
+    }
+    if (o.cueVolume && typeof o.cueVolume === 'object') {
+      for (var cj = 0; cj < CUE_IDS.length; cj++) {
+        var cid = CUE_IDS[cj]
+        var cv = Number(o.cueVolume[cid])
+        if (isFinite(cv)) state.cueVolume[cid] = Math.max(0, Math.min(100, Math.round(cv)))
+      }
+    }
+    if (o.cueCustom && typeof o.cueCustom === 'object') {
+      for (var ck = 0; ck < CUE_IDS.length; ck++) {
+        var id = CUE_IDS[ck]
+        var m = o.cueCustom[id]
+        if (m && typeof m === 'object' && typeof m.name === 'string') {
+          state.cueCustom[id] = {
+            name: m.name.slice(0, 80),
+            type: String(m.type || '').slice(0, 80),
+            size: Number(m.size) || 0,
+          }
+        }
+      }
     }
     if (o.theme === 'dark' || o.theme === 'light') state.theme = o.theme
     if (typeof o.snapOnRelease === 'boolean') state.snapOnRelease = o.snapOnRelease
+    if (o.snapCorner === 'left' || o.snapCorner === 'right') state.snapCorner = o.snapCorner
     if (typeof o.pollSeconds === 'number') state.pollSeconds = clampPoll(o.pollSeconds)
     if (typeof o.source === 'string' && o.source) state.source = o.source
+    if (typeof o.stepYuan === 'number' && isFinite(o.stepYuan)) state.stepYuan = clampStep(o.stepYuan)
+    if (typeof o.fxBowlDrop === 'boolean') state.fxBowlDrop = o.fxBowlDrop
+    if (typeof o.fxPat === 'boolean') state.fxPat = o.fxPat
+    if (typeof o.fxHurt === 'boolean') state.fxHurt = o.fxHurt
     if (typeof o.hidden === 'boolean') state.hidden = o.hidden
     if (typeof o.x === 'number' && isFinite(o.x)) state.x = o.x
     if (typeof o.y === 'number' && isFinite(o.y)) state.y = o.y
@@ -162,22 +275,21 @@ function clampPoll(s) {
 var manifest = null
 var charsById = {}
 var sources = []       // 可选余额来源（宿主下发）
-var sourceLabel = 'DSH 余额'
+var sourceLabel = 'DSH 账户余额'
 var images = {}     // filename -> HTMLImageElement
 var masks = {}      // filename -> {data, w, h}
-var sounds = []     // Audio pool
-var soundIndex = 0
 
 var container = null, canvas = null, ctx = null, menuEl = null
 var W = 0, H = 0, side = 150, spriteRect = { x: 0, y: 0, w: 0, h: 0 }
 var destroyed = false
 
 // —— 余额 / 动画状态（照搬 PetModel）——
-var realCents = null      // 最近一次服务器读数
-var bookedCents = null    // 动画中的显示值
-var pendingSteps = 0
+var realUnits = null      // 最近一次服务器读数（万分之一元）
+var bookedUnits = null    // 动画中的显示值
+var pendingUnits = 0      // 还没通过动画扣掉的差额
 var demoRemaining = 0
-var demoOffset = 0
+var demoOffsetUnits = 0
+var lastCueUnits = 0      // 最近一次提示的金额（飘字 / 演示用）
 var demoRestoreTime = 0
 var stepCooldown = 0
 var shakeTime = 0
@@ -204,7 +316,6 @@ var previousWasDisconnected = false
 var celebrateTime = 0          // >0 时角色红闪庆祝
 var lastTurnSeq = null         // null = 还没拿到基线，首个回合不弹（避免刚进页面就弹历史）
 var turnBubble = null          // { el, hideAt }
-var turnSound = null, settleSound = null
 var ledgerCache = null         // 最近一次 /ledger.json
 var ledgerInFlight = false
 var settleOverlay = null       // { root, timer }
@@ -214,6 +325,10 @@ var audioUnlocked = false
 var sourceKind = 'balance'
 var quotaRemain = null         // 0..100（宿主已统一换算成「剩余 %」）
 var quotaLabel = ''
+// —— 平板峰谷彩蛋（只对 DSH 账户余额 / DeepSeek 生效）——
+var tariffMode = false         // 点击平板切换
+var tariff = null              // { peak, label, nextLabel, nextAt, beijing }
+var tariffLoading = false
 // —— 节假日清单状态（宿主下发，用于过期/跨年提示）——
 var holidayStatus = null
 var holidayOverlay = null
@@ -336,13 +451,23 @@ function updateExpression(dt) {
   var ch = activeChar()
   if (!ch || ch.id !== EXPR_CHARACTER) { setExpression(EXPR_HAPPY); return }
 
-  // 「有扣费正在播」看的是**动画本身**，不是欠了多少钱 —— 上游特意踩过这个坑
-  var cueRunning = shakeTime > 0 || demoRestoreTime > 0
+  // 「有扣费正在播」看的是**动画本身**，不是欠了多少钱 —— 上游特意踩过这个坑。
+  // 关掉「扣费动画」后自然也不该再切紧张脸。
+  var cueRunning = state.fxHurt && (shakeTime > 0 || demoRestoreTime > 0)
   if (exprBowlAlive && !cueRunning && !exprBowlLocked) bowlWait += dt
   else if (!exprBowlAlive) bowlWait = 0
 
+  var zeroBalance = connected && sourceKind === 'balance' &&
+    realUnits !== null && realUnits <= 50   // 上游 ZeroBalEps = 0.005 元
+
   var want
-  if (exprPotOnHead && !exprBowlAlive) {
+  if (patActive) {
+    // 摸头时她一定是开心的：这是玩家主动互动，优先级高于扣费紧张与盆超时。
+    want = EXPR_HAPPY
+  } else if (zeroBalance) {
+    // 余额归零：上游 v3 的规则是「always ALOOF」，压过铁锅的冷脸。
+    want = EXPR_ALOOF
+  } else if (exprPotOnHead && !exprBowlAlive) {
     want = EXPR_CALM
   } else if (cueRunning) {
     want = EXPR_NERVOUS
@@ -367,7 +492,7 @@ function updateExpression(dt) {
 // 与上游一致的玩法要点（逐条对照过 dsh_pet.ps1）：
 //   · 场上**可以有多个盆**（一笔充值一个盆），盆之间有碰撞体积、落点会错开
 //   · 盆可以**拖**：按住拖到她身上就喂；也可以甩出去，松手时带出速度
-//   · 铁盆同理，但拖到她头顶会**扣在头上**
+//   · 铁盆同理；只有**下落**能扣在头上，摔到已有锅上会叠起来
 //   · 一个盆落地满 BowlWaitSec(10s) 没被领取 → **所有盆一起锁定**；
 //     再过 LockDelaySec(1s) 开始按 SuckAccel 加速吸向她，吸到就自动喂
 //   · 名牌只认米饭盆（铁盆永远不会被锁定）
@@ -382,6 +507,10 @@ var RICE_SLIDE_FRICTION = 1.40 // 上游 RiceSlideFriction
 var RICE_SLIDE_STOP = 14       // 上游 RiceSlideStop（px/s，低于它就停下）
 var HEART_LIFE = 1.5
 var FEED_FADE = 0.5
+// 铁锅堆叠：相邻两个锅的垂直间距 = 锅高的 2/3（稍微重叠，像一摞碗）
+var IRON_STACK_GAP = 2 / 3
+// 只有「下落」才能扣在头上：锅的向下速度低于这个值视为「放上去」，不算
+var IRON_SEAT_MIN_FALL = 30    // px/s
 
 // —— 火控雷达的锁定与吸附（上游常量，按 side 折算成这里的尺度）——
 // 上游是 340 px 的中杯：SuckAccel 960、SuckMaxSpeed 2400 → 每单位 side 为 2.82 / 7.06
@@ -393,11 +522,12 @@ function bracketS(b) { return 1.33 * b.r * 2 }
 
 var riceImg = null
 var ironImg = null
-var bowls = []           // 场上所有盆（米饭盆 + 至多一个铁盆），与上游的多目标一致
+var bowls = []           // 场上所有盆（米饭盆 + 多个可堆叠的铁锅）
 var hearts = []          // 投喂时飘起的像素爱心
-var feedSound = null
 var radarOn = false      // 「打开火控雷达」：提前把名牌亮出来给你看
 var potPendT = 0         // 投喂后延迟一小会儿再把锅丢下来
+var potPendN = 0         // 排队等待掉落的锅（一次投喂一个）
+var riceSpawnSeq = 0     // 落点分槽：连续几笔充值不会全挤在一处
 var riceEl = null        // 全屏覆盖层画布
 var riceCtx = null
 // 拖动中的盆 + 采样出的「甩出速度」（上游 _throwVX/_throwVY：
@@ -471,16 +601,26 @@ function loadTopupArt() {
     })
 }
 
-function playFeedSound() {
-  try {
-    if (!state.soundOn || !(state.volume > 0)) return
-    if (!feedSound) { feedSound = new Audio(PREFIX + '/sound/feed.mp3'); feedSound.preload = 'auto' }
-    feedSound.volume = Math.max(0, Math.min(100, state.volume)) / 100
-    try { feedSound.currentTime = 0 } catch (e) {}
-    var p = feedSound.play()
-    if (p && p.catch) p.catch(function () {})
-  } catch (err) {}
+// 摸头手部 5 帧。**五帧全到齐才启用** —— 缺帧会在循环里闪空。
+function loadPatArt() {
+  return Promise.all(PAT_FILES.map(function (f) {
+    return new Promise(function (res) {
+      var img = new Image()
+      img.onload = function () { res(img) }
+      img.onerror = function () { res(null) }
+      img.src = PREFIX + '/pat/' + f
+    })
+  })).then(function (list) {
+    var got = 0
+    for (var i = 0; i < list.length; i++) if (list[i]) got++
+    patImages = list
+    patReady = got === PAT_FILES.length
+    log(patReady ? 'pat hand loaded: ' + got + ' frames' : 'pat hand not used: ' + got + '/' + PAT_FILES.length)
+    return patReady
+  })
 }
+
+function playFeedSound() { playCue('feed') }
 
 // 场上有活着的米饭盆吗（**铁盆不算**）—— 表情机与名牌都用这个判据。
 // 上游 anyBowl 同样排除铁盆：锅在头上不该把「盆没接」的计时算进去。
@@ -491,10 +631,14 @@ function anyRiceBowl() {
   return false
 }
 function ironBowl() {
+  var any = null
   for (var i = 0; i < bowls.length; i++) {
-    if (bowls[i].iron) return bowls[i]
+    var b = bowls[i]
+    if (!b.iron || b.fed) continue
+    if (b.onHead) return b
+    if (!any) any = b
   }
-  return null
+  return any
 }
 function liveBowls() {
   var out = []
@@ -520,10 +664,13 @@ function newBowl(props) {
 function spawnRice(amount) {
   if (!riceImg) return
   var r = Math.max(10, side * 0.13)
-  // 落点在**整个窗口宽度**里随机。上游是从屏幕右边缘丢下来，这里按需求改成
-  // 整条底边都可能 —— 见 README「与原版的差异」。
+  // 落点在**整个窗口宽度**里随机（网页版的有意差异：盆活动在整个窗口底部，
+  // 不局限于屏幕角落；见 README「与原版的差异」）。分成几个槽轮转 + 槽内抖动，
+  // 这样连续几笔充值不会恰好挤在同一点 —— 与上游「落点会错开」的观感一致。
   var lo = r + side * 0.02, hi = viewW() - r - side * 0.02
-  var startX = hi > lo ? lo + Math.random() * (hi - lo) : viewW() * 0.5
+  var SLOTS = 6
+  var slot = riceSpawnSeq++ % SLOTS
+  var startX = hi > lo ? lo + (hi - lo) * ((slot + 0.15 + Math.random() * 0.7) / SLOTS) : viewW() * 0.5
   // 一笔充值一个盆 —— 场上**可以同时有多个**（上游同）
   bowls.push(newBowl({
     x: startX,
@@ -538,13 +685,16 @@ function spawnRice(amount) {
 }
 
 function spawnIronPot() {
-  // 铁盆同时只会有一个：已经有一个在场（或扣在头上）时不再掉新的，
-  // 免得两个盆叠在一起（上游同）。
-  if (!ironImg || ironBowl()) return
+  // 上游 v3：铁盆**可以叠**（每吃掉一个米饭盆掉一个），但场上最多留 5 个，
+  // 免得一直挂机时堆成一堵墙。
+  if (!ironImg) return
+  var n = 0
+  for (var i = 0; i < bowls.length; i++) if (bowls[i].iron && !bowls[i].fed) n++
+  if (n >= 5) return
   var rp = Math.max(12, side * 0.19)
   var hp = headPoint()
   bowls.push(newBowl({
-    // 从她头顶正上方落下来，这样才能扣到头上
+    // 从她头顶正上方落下来，这样才能扣到头上（并且叠在已有锅的上面）
     x: hp.x,
     y: -rp,
     r: rp,
@@ -554,16 +704,23 @@ function spawnIronPot() {
 }
 
 // 把头上的锅拿下来（上游是**双击**头部，调用方负责判双击）。
+// 堆叠时只取**最上面**那一个；下面的锅会在下一帧自动补位（落点每帧重算）。
 // 上游的行为是「铁盆**渐隐消失**」，不是把它弹飞 —— 所以复用「投喂后淡出」那条通道。
 function knockPotOff() {
-  var b = ironBowl()
-  if (!b || !b.onHead) return
-  b.onHead = false
-  b.fed = true          // fed + fedT 就是「渐隐后被移除」
-  b.fedT = 0
-  b.vx = 0; b.vy = 0
-  if (heldBowl === b) heldBowl = null
+  var top = null
+  for (var i = 0; i < bowls.length; i++) {
+    var q = bowls[i]
+    if (!q.iron || !q.onHead || q.fed) continue
+    if (!top || q.y < top.y) top = q
+  }
+  if (!top) return
+  top.onHead = false
+  top.fed = true          // fed + fedT 就是「渐隐后被移除」
+  top.fedT = 0
+  top.vx = 0; top.vy = 0
+  if (heldBowl === top) heldBowl = null
   exprPotOnHead = false
+  playCue('off')
   wake()
 }
 
@@ -598,8 +755,9 @@ function feedBowl(b) {
   b.locked = false
   b.sucking = false
   if (heldBowl === b) heldBowl = null
-  // 锅只在米饭盆被投喂后才出现
-  potPendT = 1.2
+  // 锅只在米饭盆被投喂后才出现；连续投喂会排队掉多个，形成堆叠。
+  potPendN += 1
+  potPendT = potPendT > 0 ? Math.min(potPendT, 0.25) : 1.2
   spawnHearts()
   playFeedSound()
   wake()
@@ -633,9 +791,31 @@ function separateBowls() {
 function updateBowls(dt) {
   if (potPendT > 0) {
     potPendT -= dt
-    if (potPendT <= 0) spawnIronPot()
+    if (potPendT <= 0) {
+      if (potPendN > 0) {
+        spawnIronPot()
+        potPendN -= 1
+        potPendT = potPendN > 0 ? 0.25 : 0
+      }
+    }
   }
   var hp = headPoint()
+
+  // —— 头上堆叠的锅：每帧按槽位重排位置 ——
+  // 取锅时中间那口消失后，上面的会自动往下补位，不会留下一个空洞。
+  var worn = []
+  for (var wi = 0; wi < bowls.length; wi++) {
+    var wq = bowls[wi]
+    if (wq.iron && wq.onHead && !wq.fed) worn.push(wq)
+  }
+  worn.sort(function (a, b) { return (a.headSlot || 0) - (b.headSlot || 0) })
+  for (var ws = 0; ws < worn.length; ws++) {
+    var wp = worn[ws]
+    wp.headSlot = ws
+    wp.x = hp.x
+    wp.y = hp.y - ws * (wp.r * 2 * IRON_STACK_GAP)
+  }
+  exprPotOnHead = worn.length > 0
 
   // —— 锁定判定 ——
   // 「只要有一个米饭盆落地满 BowlWaitSec 没被领取，**所有**盆一起锁定」。
@@ -674,20 +854,25 @@ function updateBowls(dt) {
       continue
     }
 
-    // —— 扣在头上：物理关闭，位置绑在头上（角色被拖走时锅跟着走）——
-    if (r.onHead) {
-      r.x = hp.x
-      r.y = hp.y
-      continue
-    }
+    // —— 扣在头上：位置已经由上面的堆叠重排写好，这里只跳过物理 ——
+    if (r.onHead) continue
 
-    // —— 铁盆落到头部高度、且横向也在头附近 → 扣上 ——
-    if (r.iron && r.vy >= 0 && (r.y + r.r * 0.35) >= hp.y &&
-        Math.abs(r.x - hp.x) <= spriteRect.w * 0.30) {
-      r.onHead = true
-      r.vx = 0; r.vy = 0
-      wake()
-      continue
+    // —— 铁锅落到头顶高度、且横向也在头附近 → 扣上 ——
+    // 只有**下落**（vy >= IRON_SEAT_MIN_FALL）才算，松手「放」在她头上不算；
+    // 有堆叠时目标高度是最上面那口锅的锅沿。
+    if (r.iron && r.vy >= IRON_SEAT_MIN_FALL) {
+      var seatY = hp.y - worn.length * (r.r * 2 * IRON_STACK_GAP)
+      if ((r.y + r.r * 0.35) >= seatY && r.y <= seatY + r.r * 1.5 &&
+          Math.abs(r.x - hp.x) <= spriteRect.w * 0.30) {
+        r.onHead = true
+        r.headSlot = worn.length
+        r.x = hp.x
+        r.y = seatY
+        r.vx = 0; r.vy = 0
+        playCue('land')
+        wake()
+        continue
+      }
     }
 
     // —— 吸附：锁定满 LockDelaySec 后开始，按 SuckAccel 加速朝她飞 ——
@@ -836,13 +1021,15 @@ function drawRiceOn(c) {
     if (b.iron || b.fed) continue
     if (b.locked || radarOn) drawRadar(c, b)
   }
+  // 摸头的手画在最上层（全屏覆盖层，不会被挂件画布裁切）
+  drawPatHand(c)
 }
 
 // 全屏覆盖层：清空后重画盆 / 爱心 / 雷达名牌。
 // 每帧都清一遍 —— 否则上一帧的盆会留在画面上擦不掉。
 function drawRiceLayer() {
   if (!riceCtx || !riceEl) return
-  if (!bowls.length && !hearts.length) {
+  if (!bowls.length && !hearts.length && !patActive) {
     // 没东西可画时也要清掉残留（比如盆刚被投喂淡出）
     if (riceEl._dirty !== false) {
       riceCtx.setTransform(1, 0, 0, 1, 0, 0)
@@ -991,16 +1178,6 @@ function ensureCanvasSize() {
   return dpr
 }
 
-function fenString(cents) {
-  if (cents === null || cents === undefined || !isFinite(cents)) return '--'
-  var neg = cents < 0
-  var a = Math.abs(Math.round(cents))
-  var yuan = Math.floor(a / 100)
-  var frac = a % 100
-  return (neg ? '-' : '') + yuan + '.' + (frac < 10 ? '0' : '') + frac
-}
-
-// 币种符号：原版只做人民币，现在来源可切，不能给美元硬套 ¥
 function currencySymbol(cur) {
   var c = String(cur || '').toUpperCase()
   if (c === 'CNY' || c === 'RMB') return '¥'
@@ -1010,9 +1187,9 @@ function currencySymbol(cur) {
   return c ? c : '¥'
 }
 
-function displayedCents() {
-  if (bookedCents === null) return null
-  return Math.max(Math.min(0, bookedCents), bookedCents - demoOffset)
+function displayedUnits() {
+  if (bookedUnits === null) return null
+  return Math.max(Math.min(0, bookedUnits), bookedUnits - demoOffsetUnits)
 }
 
 function draw() {
@@ -1136,12 +1313,13 @@ function drawTablet(ch, shakeX, shakeY, dpr) {
   // 金额类显示钱；订阅额度类没有金额，显示「剩余 %」（宿主已把各家的
   // 「已用 %」「剩余 %」两种语义统一成剩余百分比）
   var isQuota = sourceKind === 'quota'
+  var showTariff = tariffMode && !isQuota && isDeepseekSource()
+  var isConn = connected
   var value = isQuota
     ? (quotaRemain === null || !isFinite(quotaRemain) ? '--' : Math.round(quotaRemain) + '%')
-    : fenString(displayedCents())
-  var isConn = connected
+    : moneyString(displayedUnits())
 
-  // 标题：DeepSeek 用原版的"DSH 余额"，其它来源显示该来源名。
+  // 标题：DeepSeek 用「DSH 账户余额」，其它来源显示该来源名。
   // 面板只有 400 宽，名字长了就等比缩小，别顶出平板。
   // 原版标题 y 自**面板底部**起算，面板坐标系 y 向下，所以这里翻过来。
   var titleSize = ph * PANEL_TITLE_RATIO
@@ -1155,6 +1333,38 @@ function drawTablet(ch, shakeX, shakeY, dpr) {
   c.font = 'bold ' + titleSize + 'px system-ui, "Segoe UI", sans-serif'
   c.fillText(sourceLabel, pw / 2, ph - ph * PANEL_TITLE_Y_RATIO)
 
+  var rowY = ph - ph * PANEL_ROW_RATIO
+  if (showTariff) {
+    // 点击平板：金额区切换成「梁文峰 / 梁文谷 + 距峰/谷时」。
+    // 再点一下切回余额；来源不是 DeepSeek 时这个彩蛋不生效。
+    if (tariff && tariffRemainSec() <= 0) ensureTariff(true)
+    var tName = tariff ? tariff.label : '峰谷时段'
+    var tNext = tariff ? (tariff.nextLabel + ' ' + fmtDuration(tariffRemainSec())) : '正在读取…'
+    var nameSize = ph * PANEL_AMOUNT_RATIO
+    var subSize = ph * 0.16
+    c.fillStyle = isConn ? C_VALUE : C_VALUE_OFF
+    c.font = 'bold ' + nameSize + 'px system-ui, "Segoe UI", sans-serif'
+    var nameW = c.measureText(tName).width
+    var nameScale = nameW > pw * PANEL_MAX_TEXT_RATIO ? pw * PANEL_MAX_TEXT_RATIO / nameW : 1
+    c.save()
+    c.translate(pw / 2, rowY)
+    c.scale(nameScale, nameScale)
+    c.textAlign = 'center'
+    c.fillText(tName, 0, 0)
+    c.restore()
+    c.fillStyle = C_LABEL
+    c.font = 'bold ' + subSize + 'px ui-monospace, "SF Mono", Consolas, monospace'
+    c.textAlign = 'center'
+    c.fillText(tNext, pw / 2, rowY + ph * 0.18)
+    // 状态点与余额模式保持一致
+    c.beginPath()
+    c.arc(pw * DOT_X_RATIO, ph - ph * DOT_Y_RATIO, DOT_SIZE / 2, 0, Math.PI * 2)
+    c.fillStyle = lastError ? '#ff3b30' : (isConn ? '#34c759' : '#ffcc00')
+    c.fill()
+    c.setTransform(dpr, 0, 0, dpr, 0, 0)
+    return
+  }
+
   // 金额行：币种符号与数字两个字号；整行超过面板宽度 90% 就整体缩放
   var amtSize = ph * PANEL_AMOUNT_RATIO
   var curSize = ph * PANEL_CUR_RATIO
@@ -1167,7 +1377,6 @@ function drawTablet(ch, shakeX, shakeY, dpr) {
   var maxW = pw * PANEL_MAX_TEXT_RATIO
   var scale = total > maxW ? maxW / total : 1
 
-  var rowY = ph - ph * PANEL_ROW_RATIO
   c.save()
   c.translate((pw - total * scale) / 2, rowY)
   c.scale(scale, scale)
@@ -1188,6 +1397,27 @@ function drawTablet(ch, shakeX, shakeY, dpr) {
   c.fill()
 
   c.setTransform(dpr, 0, 0, dpr, 0, 0)
+}
+
+// 画布局部坐标是否落在平板四边形里（点击平板切换峰谷彩蛋用）。
+// 与 drawTablet 用同一套角点 / 缩放，避免「看得到却点不到」。
+function pointInTablet(cx, cy) {
+  var ch = activeChar()
+  if (!ch || !ch.tablet) return false
+  var s = spriteRect.w / 1536
+  var TL = ch.tablet.tl, TR = ch.tablet.tr, BL = ch.tablet.bl
+  var x0 = spriteRect.x + TL[0] * s, y0 = spriteRect.y + TL[1] * s
+  var x1 = spriteRect.x + TR[0] * s, y1 = spriteRect.y + TR[1] * s
+  var x3 = spriteRect.x + BL[0] * s, y3 = spriteRect.y + BL[1] * s
+  var x2 = x1 + x3 - x0, y2 = y1 + y3 - y0
+  var pts = [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
+  var inside = false
+  for (var i = 0, j = 3; i < 4; j = i++) {
+    var xi = pts[i][0], yi = pts[i][1]
+    var xj = pts[j][0], yj = pts[j][1]
+    if (((yi > cy) !== (yj > cy)) && (cx < (xj - xi) * (cy - yi) / (yj - yi) + xi)) inside = !inside
+  }
+  return inside
 }
 
 function drawTopupRing() {
@@ -1249,10 +1479,10 @@ function roundRect(c, x, y, w, h, r) {
 // 模型（PetModel.tick 的直译）
 // ============================================================================
 function forceSnapToReal() {
-  bookedCents = realCents
-  pendingSteps = 0
+  bookedUnits = realUnits
+  pendingUnits = 0
   demoRemaining = 0
-  demoOffset = 0
+  demoOffsetUnits = 0
   demoRestoreTime = 0
 }
 
@@ -1262,28 +1492,280 @@ function appendLabel(text, color) {
   wake()
 }
 
-function playSound() {
-  if (!state.soundOn) return
-  try {
-    if (!sounds.length) {
-      for (var i = 0; i < SOUND_POOL; i++) {
-        var a = new Audio(PREFIX + '/hit.mp3')
-        a.preload = 'auto'
-        a.volume = SOUND_VOLUME
-        sounds.push(a)
-      }
+// ============================================================================
+// 音效：每个音效独立音量 + 可选自定义音频
+// ============================================================================
+var CUE_FILES = {
+  hit: PREFIX + '/hit.mp3',
+  feed: PREFIX + '/sound/feed.mp3',
+  land: PREFIX + '/sound/pot_land.mp3',
+  off: PREFIX + '/sound/pot_off.mp3',
+  turn: PREFIX + '/sound/turn.mp3',
+  settle: PREFIX + '/sound/settle.mp3',
+}
+// 浏览器 / Electron(Chromium) 能直接解码的常见格式。
+// accept 只负责在文件选择器里过滤；真正的校验在 isSupportedAudioFile()。
+var AUDIO_ACCEPT = 'audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/ogg,audio/mp4,audio/aac,audio/flac,audio/webm,.mp3,.wav,.ogg,.m4a,.aac,.flac,.webm,.opus'
+var AUDIO_EXTS = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac', 'webm', 'opus']
+var AUDIO_MIME = {
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  aac: 'audio/aac', flac: 'audio/flac', webm: 'audio/webm', opus: 'audio/ogg',
+}
+var AUDIO_MAX_BYTES = 20 * 1024 * 1024
+var customUrls = {}      // cue -> objectURL / dataURL
+var cuePools = {}        // "cue|src" -> pool
+var audioDbPromise = null
+
+function cueVolume(name) {
+  var v = state.cueVolume && state.cueVolume[name]
+  if (!isFinite(v)) v = state.volume
+  return Math.max(0, Math.min(100, Math.round(Number(v) || 0)))
+}
+
+function allCuesAt(v) {
+  for (var i = 0; i < CUE_IDS.length; i++) if (cueVolume(CUE_IDS[i]) !== v) return false
+  return true
+}
+
+function cueSource(name) {
+  return customUrls[name] || CUE_FILES[name]
+}
+
+function resetCuePool(name) {
+  for (var key in cuePools) {
+    if (!Object.prototype.hasOwnProperty.call(cuePools, key)) continue
+    if (key.indexOf(name + '|') !== 0) continue
+    var pool = cuePools[key]
+    for (var i = 0; i < pool.length; i++) {
+      try { pool[i].pause() } catch (err) {}
     }
-    soundIndex = (soundIndex + 1) % sounds.length
-    var s = sounds[soundIndex]
+    delete cuePools[key]
+  }
+}
+
+function playCue(name) {
+  if (!state.soundOn) return
+  var vol = cueVolume(name)
+  if (!(vol > 0)) return
+  var src = cueSource(name)
+  if (!src) return
+  try {
+    var key = name + '|' + src
+    var pool = cuePools[key]
+    if (!pool) {
+      pool = cuePools[key] = []
+      var slots = name === 'hit' ? SOUND_POOL : (name === 'settle' ? 1 : 2)
+      for (var i = 0; i < slots; i++) {
+        var a = new Audio(src)
+        // 结算音很大：只在真的播放时拉取，绝不预加载
+        a.preload = (name === 'settle' && !customUrls[name]) ? 'none' : 'auto'
+        pool.push(a)
+      }
+      pool._i = 0
+    }
+    pool._i = (pool._i + 1) % pool.length
+    var s = pool[pool._i]
+    s.volume = vol / 100
     try { s.pause(); s.currentTime = 0 } catch (err) {}
     var p = s.play()
     if (p && p.catch) p.catch(function () {})
   } catch (err) {}
 }
 
-function oneStep() {
+function playSound() { playCue('hit') }
+
+function audioExt(name) {
+  var m = /\.([a-z0-9]+)$/i.exec(String(name || ''))
+  return m ? m[1].toLowerCase() : ''
+}
+
+// 只有浏览器能直接解码的格式才接受。MIME 可能为空（拖拽 / 系统不识别），
+// 所以先看扩展名，再用 canPlayType 复核。
+function audioFileProblem(file) {
+  if (!file) return '没有选择文件'
+  if (file.size > AUDIO_MAX_BYTES) return '文件过大（上限 20 MB）'
+  var ext = audioExt(file.name)
+  if (AUDIO_EXTS.indexOf(ext) < 0) return '不支持的格式：.' + (ext || '?') + '（支持 mp3 / wav / ogg / m4a / aac / flac / webm / opus）'
+  var mime = String(file.type || AUDIO_MIME[ext] || '')
+  try {
+    var probe = new Audio()
+    if (typeof probe.canPlayType === 'function' && mime) {
+      var can = probe.canPlayType(mime)
+      if (!can) return '当前客户端不能解码 ' + mime
+    }
+  } catch (err) {}
+  return ''
+}
+
+function setCueVolume(name, v) {
+  var pct = Math.max(0, Math.min(100, Math.round(Number(v) || 0)))
+  state.cueVolume[name] = pct
+  saveState()
+  // 结算音 13.5 MB，改音量时不要为了试听把它整段拉下来
+  if (pct > 0 && name !== 'settle') playCue(name)
+}
+
+function setVolume(v) {
+  var pct = Math.max(0, Math.min(100, Math.round(Number(v) || 0)))
+  state.volume = pct
+  // 旧版总音量保留为「一键设置全部音效」；之后每个音效各自的音量仍然独立。
+  for (var i = 0; i < CUE_IDS.length; i++) state.cueVolume[CUE_IDS[i]] = pct
+  // 与上游一致：0% 就是静音，所以开关必须跟着走，否则菜单会出现「声音开着但没声」
+  state.soundOn = pct > 0
+  saveState()
+  // 放一小段，让新音量立刻听得出来
+  if (state.soundOn) playCue('turn')
+}
+
+// —— 自定义音效的持久化（IndexedDB 存 Blob；失败时退回内存 dataURL）——
+function openAudioDb() {
+  if (audioDbPromise) return audioDbPromise
+  audioDbPromise = new Promise(function (resolve) {
+    try {
+      if (!window.indexedDB) return resolve(null)
+      var req = window.indexedDB.open('dshpet-audio', 1)
+      req.onupgradeneeded = function () {
+        try { req.result.createObjectStore('clips', { keyPath: 'cue' }) } catch (err) {}
+      }
+      req.onsuccess = function () { resolve(req.result) }
+      req.onerror = function () { resolve(null) }
+      req.onblocked = function () { resolve(null) }
+    } catch (err) { resolve(null) }
+  })
+  return audioDbPromise
+}
+
+function idbReq(mode, fn) {
+  return openAudioDb().then(function (db) {
+    if (!db) return null
+    return new Promise(function (resolve) {
+      try {
+        var tx = db.transaction(['clips'], mode)
+        var store = tx.objectStore('clips')
+        var req = fn(store)
+        req.onsuccess = function () { resolve(req.result || null) }
+        req.onerror = function () { resolve(null) }
+      } catch (err) { resolve(null) }
+    })
+  })
+}
+
+function loadCustomClips() {
+  return openAudioDb().then(function (db) {
+    if (!db) {
+      // 没有 IndexedDB（无痕模式等）：清掉悬空的自定义元信息，避免菜单显示「自定义」却没有文件
+      var had = false
+      for (var i = 0; i < CUE_IDS.length; i++) {
+        if (state.cueCustom[CUE_IDS[i]]) { delete state.cueCustom[CUE_IDS[i]]; had = true }
+      }
+      if (had) saveState()
+      return
+    }
+    return Promise.all(CUE_IDS.map(function (cue) {
+      return idbReq('readonly', function (store) { return store.get(cue) }).then(function (rec) {
+        if (!rec || !rec.blob) {
+          if (state.cueCustom[cue]) { delete state.cueCustom[cue]; saveState() }
+          return
+        }
+        try {
+          if (customUrls[cue]) URL.revokeObjectURL(customUrls[cue])
+          customUrls[cue] = URL.createObjectURL(rec.blob)
+          state.cueCustom[cue] = {
+            name: String(rec.name || ('自定义' + cue)).slice(0, 80),
+            type: String(rec.type || rec.blob.type || '').slice(0, 80),
+            size: Number(rec.size) || rec.blob.size || 0,
+          }
+        } catch (err) {}
+      })
+    })).then(function () {
+      saveState()
+    })
+  }).catch(function () {})
+}
+
+function applyCustomBlob(cue, blob, name) {
+  return idbReq('readwrite', function (store) {
+    return store.put({ cue: cue, blob: blob, name: name, type: blob.type || '', size: blob.size })
+  }).then(function (saved) {
+    var url = ''
+    try { url = URL.createObjectURL(blob) } catch (err) { return false }
+    if (customUrls[cue]) { try { URL.revokeObjectURL(customUrls[cue]) } catch (err) {} }
+    customUrls[cue] = url
+    state.cueCustom[cue] = {
+      name: String(name || '').slice(0, 80),
+      type: String(blob.type || '').slice(0, 80),
+      size: blob.size,
+    }
+    saveState()
+    resetCuePool(cue)
+    return true
+  }).catch(function () { return false })
+}
+
+function readFileAsBlob(file) {
+  if (file && typeof file.slice === 'function') return Promise.resolve(file)
+  return new Promise(function (resolve) { resolve(null) })
+}
+
+function useCustomCue(cue, file) {
+  var problem = audioFileProblem(file)
+  if (problem) { showToast(problem, false); return Promise.resolve(false) }
+  return readFileAsBlob(file).then(function (blob) {
+    if (!blob) { showToast('无法读取这个文件', false); return false }
+    return applyCustomBlob(cue, blob, file.name).then(function (ok) {
+      if (!ok) { showToast('自定义音效保存失败', false); return false }
+      showToast('已应用自定义音效：' + file.name, true)
+      playCue(cue)
+      return true
+    })
+  })
+}
+
+function restoreFactoryCue(cue) {
+  return idbReq('readwrite', function (store) { return store.delete(cue) })
+    .then(function () {
+      if (customUrls[cue]) { try { URL.revokeObjectURL(customUrls[cue]) } catch (err) {} }
+      delete customUrls[cue]
+      delete state.cueCustom[cue]
+      saveState()
+      resetCuePool(cue)
+      showToast('已恢复出厂音效', true)
+      return true
+    })
+}
+
+function pickCustomCue(cue) {
+  try {
+    var inp = document.createElement('input')
+    inp.type = 'file'
+    inp.accept = AUDIO_ACCEPT
+    inp.style.display = 'none'
+    inp.setAttribute('data-dshpet-cue', cue)
+    inp.addEventListener('change', function () {
+      var f = inp.files && inp.files[0]
+      if (f) useCustomCue(cue, f)
+      try { if (inp.parentNode) inp.parentNode.removeChild(inp) } catch (err) {}
+    })
+    ;(document.body || document.documentElement).appendChild(inp)
+    inp.click()
+  } catch (err) { showToast('当前环境不能打开文件选择器', false) }
+}
+
+function previewCue(cue) {
+  if (cue === 'settle' && !customUrls[cue]) {
+    showToast('结算音效 13.5 MB，默认不预加载 / 不试听', false)
+    return
+  }
+  if (!state.soundOn) { showToast('声音已关闭', false); return }
+  if (!(cueVolume(cue) > 0)) { showToast('这个音效的音量是 0%', false); return }
+  playCue(cue)
+}
+
+function oneStep(amountUnits) {
+  lastCueUnits = amountUnits
+  if (!state.fxHurt) return
   shakeTime = HIT_DURATION
-  appendLabel('-0.01', C_HIT)
+  appendLabel('-' + moneyString(amountUnits), C_HIT)
   playSound()
 }
 
@@ -1298,10 +1780,11 @@ function tick(dt) {
   if (nervousT > 0) nervousT = Math.max(0, nervousT - dt)
   updateBowls(dt)
   updateHearts(dt)
+  updatePat(dt)
   updateExpression(dt)
   if (demoRestoreTime > 0) {
     demoRestoreTime = Math.max(0, demoRestoreTime - dt)
-    if (demoRestoreTime === 0) demoOffset = 0
+    if (demoRestoreTime === 0) demoOffsetUnits = 0
   }
 
   for (var i = floating.length - 1; i >= 0; i--) {
@@ -1312,22 +1795,27 @@ function tick(dt) {
   stepCooldown -= dt
   if (stepCooldown <= 1e-9) {
     var did = false
-    if (pendingSteps > 0 && bookedCents !== null && realCents !== null && bookedCents > realCents) {
-      bookedCents -= 1
-      pendingSteps -= 1
+    if (pendingUnits > 0 && bookedUnits !== null && realUnits !== null && bookedUnits > realUnits) {
+      // 每一步最多扣「步长」；余额只掉了不足一步时，最后一步按实际差额提示一次，
+      // 这样显示值不会停在半路，也不会漏掉小于步长的扣费。
+      var take = Math.min(stepUnits(), pendingUnits, bookedUnits - realUnits)
+      bookedUnits -= take
+      pendingUnits -= take
+      lastCueUnits = take
       did = true
     } else if (demoRemaining > 0) {
       demoRemaining -= 1
-      demoOffset += 1
+      demoOffsetUnits += stepUnits()
+      lastCueUnits = stepUnits()
       if (demoRemaining === 0) demoRestoreTime = DEMO_RESTORE
       did = true
     } else {
-      pendingSteps = 0
+      pendingUnits = 0
     }
     if (did) {
       // 保留小数余量，否则 60Hz 下每拍会被拉长到 13 帧
       stepCooldown = Math.max(0, stepCooldown + STEP_INTERVAL)
-      oneStep()
+      oneStep(lastCueUnits)
     }
   }
 
@@ -1347,10 +1835,11 @@ function tick(dt) {
 
 function needsAnimation() {
   return shakeTime > 0 || celebrateTime > 0 || topupTime > 0 || demoRestoreTime > 0 ||
-    floating.length > 0 || pendingSteps > 0 || demoRemaining > 0 || !!snapAnim ||
+    floating.length > 0 || pendingUnits > 0 || demoRemaining > 0 || !!snapAnim ||
     // 表情状态机也得算「还忙」：紧张表情的最后 1 秒保持靠 tick 倒数，
     // 漏掉这一项的话扣费动画一停、帧循环就断，表情会永远卡在紧张上。
-    nervousT > 0 || exprBowlAlive || bowls.length > 0 || hearts.length > 0 || potPendT > 0
+    nervousT > 0 || exprBowlAlive || bowls.length > 0 || hearts.length > 0 || potPendT > 0 ||
+    patActive || patWaitingPotOff || patBlocked || patAccum > 0 || patMoveMs > 0
 }
 
 function frame(ts) {
@@ -1375,35 +1864,37 @@ function wake() {
 }
 
 // —— 应用一次服务器读数（PetModel.apply 的直译）——
-function applyReading(cents, snap) {
-  var previousReal = realCents
-  realCents = cents
-  if (snap || previousReal === null || bookedCents === null) {
+function applyReading(units, snap) {
+  var previousReal = realUnits
+  realUnits = units
+  if (snap || previousReal === null || bookedUnits === null) {
     forceSnapToReal()
     wake()
     return
   }
-  if (cents > previousReal) {
+  if (units > previousReal) {
     // 充值：对齐 + 绿字，delta 是相对**上一次服务器读数**
-    var delta = cents - previousReal
+    var delta = units - previousReal
     forceSnapToReal()
     topupTime = TOPUP_DURATION
-    appendLabel('+' + fenString(delta), C_TOPUP)
-    // 充值就掉一个米饭盆（上游的核心玩法）
-    spawnRice(delta / 100)
+    appendLabel('+' + moneyString(delta), C_TOPUP)
+    // 充值就掉一个米饭盆（上游的核心玩法）。关掉「充值掉盆」后，钱直接入账，
+    // 不再需要手动拖取 —— 与上游同一个语义。
+    if (state.fxBowlDrop) spawnRice(fromUnits(delta))
     wake()
     return
   }
-  if (cents < bookedCents) {
-    var steps = bookedCents - cents
-    if (!isFinite(steps) || steps > MAX_PENDING_STEPS) {
+  if (units < bookedUnits) {
+    var diff = bookedUnits - units
+    // 积压的「步数」太多（例如换了来源/长时间没开页面）就直接对齐，不补播几百次
+    if (!isFinite(diff) || diff > stepUnits() * MAX_PENDING_CUES) {
       forceSnapToReal()
       wake()
       return
     }
-    pendingSteps = steps
+    pendingUnits = diff
   } else {
-    pendingSteps = 0
+    pendingUnits = 0
   }
   wake()
 }
@@ -1455,12 +1946,12 @@ function pollOnce(snap, force) {
       }
       sourceKind = 'balance'
       quotaRemain = null
-      var cents = Math.round(Number(j.totalBalance) * 100)
-      if (!isFinite(cents)) {
+      var units = toUnits(j.totalBalance)
+      if (!isFinite(units)) {
         connected = false; previousWasDisconnected = true; lastError = '余额数值异常'; draw(); return
       }
       // 断线后的第一次读数直接对齐，不补播积压动画
-      applyReading(cents, snap || previousWasDisconnected)
+      applyReading(units, snap || previousWasDisconnected)
       previousWasDisconnected = false
       if (!animating) draw()
     })
@@ -1502,7 +1993,7 @@ function pollLoop() {
 function applySourceMeta() {
   var found = null
   for (var i = 0; i < sources.length; i++) if (sources[i].id === state.source) found = sources[i]
-  sourceLabel = (!found || found.builtin) ? 'DSH 余额' : String(found.name || 'DSH 余额')
+  sourceLabel = (!found || found.builtin) ? 'DSH 账户余额' : String(found.name || 'DSH 账户余额')
 }
 
 function setSource(id) {
@@ -1511,11 +2002,11 @@ function setSource(id) {
   applySourceMeta()
   saveState()
   // 换来源 = 换币种 / 换量纲：动画状态全部清空，下一轮直接对齐，绝不能和旧来源的数字做差
-  realCents = null
-  bookedCents = null
-  pendingSteps = 0
+  realUnits = null
+  bookedUnits = null
+  pendingUnits = 0
   demoRemaining = 0
-  demoOffset = 0
+  demoOffsetUnits = 0
   demoRestoreTime = 0
   floating = []
   shakeTime = 0
@@ -1527,10 +2018,98 @@ function setSource(id) {
   sourceKind = 'balance'
   quotaRemain = null
   quotaLabel = ''
+  tariffMode = false
+  tariff = null
   previousWasDisconnected = true
   nextPollAt = 0
   draw()
   pollOnce(true, true)
+}
+
+// —— 平板峰谷彩蛋 ——
+// 只对内置「DSH 账户余额」或明确是 DeepSeek 的来源生效。
+function isDeepseekSource() {
+  var found = null
+  for (var i = 0; i < sources.length; i++) if (sources[i].id === state.source) found = sources[i]
+  if (!found) return state.source === 'deepseek'
+  if (found.builtin) return true
+  var id = String(found.id || '').toLowerCase()
+  var provider = String(found.provider || '').toLowerCase()
+  var name = String(found.name || '').toLowerCase()
+  return id.indexOf('deepseek') >= 0 || provider.indexOf('deepseek') >= 0 || name.indexOf('deepseek') >= 0
+}
+
+function tariffRemainSec() {
+  if (!tariff || !isFinite(Number(tariff.nextAt))) return 0
+  return Math.max(0, Math.floor(Number(tariff.nextAt) - Date.now() / 1000))
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0))
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60
+  return (h > 0 ? h + ':' : '') + (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s
+}
+
+// 宿主 /tariff.json 不可用时（例如刚更新插件、还没重启 DSH）的本地兜底。
+// 只按「工作日 9–12 / 14–18 峰价，周末谷价」估算，不含法定节假日；
+// 宿主路由可用时以宿主为准（它会带上假日表）。
+var WEEKEND_VALLEY_FROM = Math.floor(Date.UTC(2026, 7, 22, 16, 0, 0) / 1000)
+function fallbackPeak(sec) {
+  var bj = new Date(sec * 1000 + 8 * 3600 * 1000)
+  if (sec >= WEEKEND_VALLEY_FROM) {
+    var dow = bj.getUTCDay()
+    if (dow === 0 || dow === 6) return false
+  }
+  var hour = bj.getUTCHours()
+  return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18)
+}
+function fallbackTariff() {
+  var now = Math.floor(Date.now() / 1000)
+  var peak = fallbackPeak(now)
+  var nextAt = now + 6 * 3600
+  for (var t = now + 60; t <= now + 14 * 86400; t += 60) {
+    if (fallbackPeak(t) !== peak) { nextAt = t; break }
+  }
+  var bj = new Date((now + 8 * 3600) * 1000)
+  var pad = function (n) { return String(n).padStart(2, '0') }
+  return {
+    ok: true,
+    fallback: true,
+    now: now,
+    peak: peak,
+    label: peak ? '梁文峰' : '梁文谷',
+    nextLabel: peak ? '距谷时' : '距峰时',
+    nextAt: nextAt,
+    remainSec: Math.max(0, nextAt - now),
+    beijing: pad(bj.getUTCHours()) + ':' + pad(bj.getUTCMinutes()) + ':' + pad(bj.getUTCSeconds()),
+  }
+}
+
+function ensureTariff(force) {
+  if (!tariffMode || !isDeepseekSource() || tariffLoading) return
+  if (!force && tariff && tariffRemainSec() > 0) return
+  tariffLoading = true
+  fetch(PREFIX + '/tariff.json', { credentials: 'same-origin', cache: 'no-store' })
+    .then(function (r) { return r.json() })
+    .then(function (j) {
+      tariffLoading = false
+      if (j && j.ok) tariff = j
+      else tariff = fallbackTariff()
+      wake()
+    })
+    .catch(function () {
+      tariffLoading = false
+      tariff = fallbackTariff()
+      wake()
+    })
+}
+
+function toggleTariff() {
+  if (!isDeepseekSource()) return
+  tariffMode = !tariffMode
+  if (tariffMode) ensureTariff(true)
+  wake()
+  draw()
 }
 
 // ============================================================================
@@ -1549,14 +2128,21 @@ function place() {
   container.style.top = Math.round(y) + 'px'
 }
 
+function cornerName() { return state.snapCorner === 'right' ? '右下角' : '左下角' }
+
 function snapToCorner() {
+  var toX = state.snapCorner === 'right'
+    ? Math.max(0, window.innerWidth - W - ANCHOR_MARGIN)
+    : ANCHOR_MARGIN
   snapAnim = {
     fromX: state.x === null ? ANCHOR_MARGIN : state.x,
     fromY: state.y === null ? (window.innerHeight - H - ANCHOR_MARGIN) : state.y,
-    toX: ANCHOR_MARGIN,
+    toX: toX,
     toY: window.innerHeight - H - ANCHOR_MARGIN,
     t: 0,
   }
+  patBlocked = true
+  patBlockMs = PAT_SETTLE_MS
   wake()
 }
 
@@ -1605,6 +2191,168 @@ function onPointerMove(e) {
   var inside = p.x >= 0 && p.y >= 0 && p.x <= W && p.y <= H
   var opaque = inside && hitTest(p.x, p.y)
   container.style.pointerEvents = opaque ? 'auto' : 'none'
+  notePatPointer(e)
+}
+
+// ============================================================================
+// 摸头手势（petpet）
+// ============================================================================
+function patOnHer(e) {
+  if (!container || state.hidden) return false
+  if (typeof e.clientX !== 'number' || typeof e.clientY !== 'number') return false
+  var p = localPoint(e)
+  if (p.x < 0 || p.y < 0 || p.x > W || p.y > H) return false
+  return hitTest(p.x, p.y)
+}
+
+function startPat() {
+  patActive = true
+  patT = 0
+  patAccum = 0
+  patMoveMs = 0
+  patIdleMs = 0
+  patHeartT = 0
+  patWaitingPotOff = false
+  spawnHearts()
+  wake()
+}
+
+function stopPat() {
+  patActive = false
+  patT = 0
+  patAccum = 0
+  patMoveMs = 0
+  patIdleMs = 0
+  patWaitingPotOff = false
+}
+
+// 指针移动采样：只在「她身上 + 没有按键」时累计划动距离。
+// 拖动 / 拿盆 / 右键菜单 / 吸附飞行期间都不算，并且会被短暂封锁。
+function notePatPointer(e) {
+  if (!state.fxPat || patBlocked || dragging || heldBowl || state.hidden || menuOpen()) {
+    patPointerOn = false
+    patAccum = 0
+    patMoveMs = 0
+    patSeen = false
+    patMoved = false
+    return
+  }
+  var on = (e.buttons === 0) && patOnHer(e)
+  patPointerOn = on
+  if (!on) {
+    patAccum = 0
+    patMoveMs = 0
+    patSeen = false
+    patMoved = false
+    if (patActive || patWaitingPotOff) wake()
+    return
+  }
+  if (patSeen) {
+    var dx = e.clientX - patLastX
+    var dy = e.clientY - patLastY
+    var d = Math.sqrt(dx * dx + dy * dy)
+    // 单帧跳半屏是指针跳跃（远程桌面 / 瞬移），不算划动
+    if (d > 0 && d <= PAT_MOVE_MAX_STEP) {
+      patAccum = Math.min(PAT_MOVE_MIN_PX * 4, patAccum + d)
+      patMoved = true
+    }
+  }
+  patSeen = true
+  patLastX = e.clientX
+  patLastY = e.clientY
+  if (patActive) patIdleMs = 0
+  // 摸头状态机跑在 rAF 的 tick 里；指针移动本身不会启动帧循环，
+  // 不唤醒的话「划满 500ms」永远没有机会被计数。
+  wake()
+}
+
+function updatePat(dt) {
+  if (patBlocked) {
+    patBlockMs -= dt * 1000
+    if (patBlockMs <= 0) { patBlocked = false; patBlockMs = 0 }
+  }
+  if (!state.fxPat) {
+    if (patActive) stopPat()
+    return
+  }
+  var moving = patPointerOn && patMoved
+  patMoved = false
+
+  // 铁锅还在头上：先把它敲掉，等它淡出再开始摸（上游同样的顺序）
+  if (patWaitingPotOff) {
+    if (!patPointerOn) { patWaitingPotOff = false; return }
+    if (exprPotOnHead) return
+    startPat()
+    return
+  }
+
+  if (patActive) {
+    patT += dt * 1000
+    patHeartT -= dt
+    if (patHeartT <= 0) { patHeartT = 0.75; spawnHearts() }
+    if (!patPointerOn) {
+      patIdleMs += dt * 1000
+      if (patIdleMs >= PAT_END_DELAY_MS) stopPat()
+      return
+    }
+    if (moving) {
+      patIdleMs = 0
+    } else {
+      patIdleMs += dt * 1000
+      patAccum = Math.max(0, patAccum - PAT_MOVE_DECAY * dt * 1000)
+      if (patIdleMs >= PAT_END_DELAY_MS) stopPat()
+    }
+    return
+  }
+
+  if (moving) {
+    if (patAccum >= PAT_MOVE_MIN_PX) patMoveMs += dt * 1000
+  } else {
+    patAccum = Math.max(0, patAccum - PAT_MOVE_DECAY * dt * 1000)
+    if (patAccum < PAT_MOVE_MIN_PX) patMoveMs = 0
+  }
+  if (patAccum >= PAT_MOVE_MIN_PX && patMoveMs >= PAT_START_DELAY_MS) {
+    if (exprPotOnHead) {
+      patWaitingPotOff = true
+      knockPotOff()
+      patMoveMs = 0
+      patAccum = 0
+      return
+    }
+    startPat()
+  }
+}
+
+function patFrameIndex() {
+  return Math.floor((patT % (PAT_FRAME_MS * PAT_FILES.length)) / PAT_FRAME_MS) % PAT_FILES.length
+}
+
+// 手部素材是「从左边伸进来的一只手」，掌心按上游的 palm 比例落在她头顶。
+// 画在**全屏覆盖层**上（视口坐标），所以手不会被挂件画布裁掉。
+function drawPatHand(c) {
+  if (!patActive || !patReady) return
+  var idx = patFrameIndex()
+  var img = patImages[idx]
+  if (!img || !img.width) return
+  var k = side / 454
+  var dw = img.width * k
+  var dh = img.height * k
+  var crownY = 40 * PAT_REF_SCALE * k
+  var palmFx = PAT_PALM_X[idx] + PAT_PALM_BIAS_X
+  var palmFy = PAT_PALM_Y[idx] + PAT_PALM_BIAS_Y
+  var hp = headPoint()
+  var handX = hp.x - palmFx * dw
+  var handY = (typeof state.y === 'number' ? state.y : 0) + crownY - palmFy * dh
+  c.save()
+  if (state.snapCorner === 'right') {
+    // 镜像整只手，让它从她所在的那一侧伸进来（位置与图像一起翻）
+    c.translate(Math.round(handX + dw / 2), 0)
+    c.scale(-1, 1)
+    c.translate(-Math.round(handX + dw / 2), 0)
+  }
+  c.globalAlpha = 0.98
+  c.drawImage(img, handX, handY, dw, dh)
+  c.restore()
 }
 
 function menuOpen() {
@@ -1687,6 +2435,16 @@ function onPointerDown(e) {
     return
   }
 
+  // 任何按键都说明玩家在「操作」她，不是「抚摸」她：立刻停手并短暂封锁，
+  // 避免手部动画跟着拖拽 / 菜单点击一起抖动。
+  if (patActive) stopPat()
+  patBlocked = true
+  patBlockMs = PAT_SETTLE_MS
+  patPointerOn = false
+  patAccum = 0
+  patMoveMs = 0
+  wake()
+
   // 米饭盆与铁锅**活动在整个窗口里**，所以必须在「是否落在挂件盒子里」之前判定，
   // 而且用的是**视口坐标**（e.clientX/Y），不是画布局部坐标。
   // 命中时吞掉事件：同一击不该再落到下面的 DSH 界面上。
@@ -1744,6 +2502,7 @@ function onPointerDown(e) {
     startX: e.clientX, startY: e.clientY,
     origX: state.x, origY: state.y,
     moved: false,
+    onTablet: pointInTablet(p.x, p.y),
   }
   container.style.pointerEvents = 'auto'
   window.addEventListener('pointermove', onDragMove, true)
@@ -1767,10 +2526,21 @@ function onDragEnd() {
   window.removeEventListener('pointermove', onDragMove, true)
   window.removeEventListener('pointerup', onDragEnd, true)
   var moved = dragging && dragging.moved
+  var wasTablet = dragging && dragging.onTablet
   dragging = null
+  patBlocked = true
+  patBlockMs = PAT_SETTLE_MS
+  wake()
+  if (!moved && wasTablet) {
+    // 单击平板（没有拖动）→ 金额区在「余额」与「梁文峰 / 梁文谷 + 剩余时长」之间切换
+    toggleTariff()
+    return
+  }
   if (moved) {
+    // 松手时她在屏幕哪一半，就吸附回哪一侧的下角（与上游一致）。
+    state.snapCorner = (state.x + W / 2) < (window.innerWidth / 2) ? 'left' : 'right'
     if (state.snapOnRelease) snapToCorner()
-    else saveState()
+    else { saveState(); wake() }
   }
 }
 
@@ -1895,6 +2665,27 @@ function showPrompt(opt) {
 }
 
 // ============================================================================
+// 轻量提示条（音效上传 / 试听的反馈）
+// ============================================================================
+var toastEl = null, toastTimer = 0
+function showToast(text, ok) {
+  try {
+    if (!toastEl) {
+      toastEl = document.createElement('div')
+      toastEl.id = 'dshpet-toast'
+      ;(document.body || document.documentElement).appendChild(toastEl)
+    }
+    toastEl.className = ok ? 'is-ok' : 'is-err'
+    toastEl.textContent = String(text || '')
+    toastEl.style.display = 'block'
+    if (toastTimer) clearTimeout(toastTimer)
+    toastTimer = setTimeout(function () {
+      if (toastEl) toastEl.style.display = 'none'
+    }, 2600)
+  } catch (err) {}
+}
+
+// ============================================================================
 // 显示设置（尺寸 / 外观 / 声音）
 // ============================================================================
 function setSizeIndex(i) {
@@ -1938,25 +2729,20 @@ function setTheme(t) {
 function setSoundOn(on) {
   state.soundOn = !!on
   // 打开声音时若音量还是 0，恢复到一个能听见的默认值，否则「开启」等于没开
-  if (state.soundOn && !(state.volume > 0)) state.volume = 80
+  if (state.soundOn && !(state.volume > 0)) {
+    state.volume = 80
+    for (var i = 0; i < CUE_IDS.length; i++) {
+      if (!(cueVolume(CUE_IDS[i]) > 0)) state.cueVolume[CUE_IDS[i]] = 80
+    }
+  }
   saveState()
-  if (state.soundOn) playSoundFile('turn')
-}
-
-function setVolume(v) {
-  var pct = Math.max(0, Math.min(100, Math.round(Number(v) || 0)))
-  state.volume = pct
-  // 与上游一致：0% 就是静音，所以开关必须跟着走，否则菜单会出现「声音开着但没声」
-  state.soundOn = pct > 0
-  saveState()
-  // 放一小段，让新音量立刻听得出来
-  if (state.soundOn) playSoundFile('turn')
+  if (state.soundOn) playCue('turn')
 }
 
 function askVolume() {
   showPrompt({
-    title: '自定义音量',
-    label: '音量百分比（0 ~ 100）。填 0 等于静音。',
+    title: '全部音效音量',
+    label: '把所有音效统一设为这个音量（0 ~ 100）。之后仍可在「单独音效」里逐个调整。',
     value: state.volume,
     suffix: '%',
     onOk: function (v, msg) {
@@ -1972,6 +2758,125 @@ function askVolume() {
         return false
       }
       setVolume(n)
+      return true
+    },
+  })
+}
+
+// —— 扣费步长：每扣多少钱提示一次 ——
+function setStep(yuan) {
+  state.stepYuan = clampStep(yuan)
+  saveState()
+  // 改小步长时，已经积压的差额会在后续节拍里按新步长继续提示；
+  // 改大步长也不会丢掉余额，剩下的差额会作为最后一步补上。
+  wake()
+}
+
+function askStep() {
+  showPrompt({
+    title: '自定义扣费步长',
+    label: '每扣多少钱提示一次。范围 0.01 ~ 100 元（默认 0.01），最小单位 0.01 元。',
+    value: stepLabel(),
+    suffix: '元',
+    onOk: function (v, msg) {
+      var n = Number(String(v).replace(/，/g, '.').replace(/,/g, '.'))
+      if (!isFinite(n)) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入一个数字，例如 0.01 或 0.5'
+        return false
+      }
+      var cents = Math.round(n * 100)
+      if (cents < 1) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '太小了：最小 0.01 元'
+        return false
+      }
+      if (cents > 10000) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '太大了：最大 100 元'
+        return false
+      }
+      if (Math.abs(cents / 100 - n) > 1e-9) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '最小单位是 0.01 元（最多两位小数）'
+        return false
+      }
+      setStep(cents / 100)
+      return true
+    },
+  })
+}
+
+function setFx(which, on) {
+  if (which === 'bowl') state.fxBowlDrop = !!on
+  else if (which === 'pat') state.fxPat = !!on
+  else if (which === 'hurt') state.fxHurt = !!on
+  saveState()
+  if (!state.fxPat && patActive) stopPat()
+  if (!state.fxPat) {
+    patPointerOn = false
+    patMoved = false
+    patSeen = false
+  }
+  wake()
+}
+
+// —— 演示次数 / 测试充值金额 ——
+function askDemoCount() {
+  showPrompt({
+    title: '自定义演示次数',
+    label: '连续扣费演示要播放几次？每次扣「一个步长」（当前 ' + stepLabel() + ' 元）。',
+    value: 10,
+    suffix: '次',
+    onOk: function (v, msg) {
+      if (!/^\d+$/.test(v)) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入 1 ~ ' + MAX_DEMO_STEPS + ' 的整数'
+        return false
+      }
+      var n = parseInt(v, 10)
+      if (n < 1 || n > MAX_DEMO_STEPS) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '超出范围：' + n + '（应在 1 ~ ' + MAX_DEMO_STEPS + ' 之间）'
+        return false
+      }
+      playDemo(n)
+      return true
+    },
+  })
+}
+
+function testTopUp(yuan) {
+  var amount = Number(yuan)
+  if (!isFinite(amount) || amount <= 0) return
+  if (state.fxBowlDrop) spawnRice(amount)
+  else {
+    // 掉盆关掉时，测试充值只演示绿色光环与飘字（不会真的加钱，也不改显示余额）
+    appendLabel('+' + moneyString(toUnits(amount)), C_TOPUP)
+    topupTime = TOPUP_DURATION
+    wake()
+  }
+}
+
+function askTopUp() {
+  showPrompt({
+    title: '自定义测试充值金额',
+    label: '模拟充值多少元？只掉米饭盆，不会真的加钱。',
+    value: 3,
+    suffix: '元',
+    onOk: function (v, msg) {
+      var n = Number(String(v).replace(/，/g, '.').replace(/,/g, '.'))
+      if (!isFinite(n) || n <= 0) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入一个大于 0 的金额'
+        return false
+      }
+      if (n > 100000) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '太大了（上限 100000 元）'
+        return false
+      }
+      testTopUp(n)
       return true
     },
   })
@@ -2045,7 +2950,7 @@ function mainMenu() {
         var mark = s.id === state.source ? '✓ ' : '　'
         var kind = s.kind === 'quota' ? '［额度］' : ''
         var best = s.bestEffort ? '［尽力而为］' : ''
-        var name = s.builtin ? 'DSH 余额（DeepSeek）' : s.name
+        var name = s.builtin ? 'DSH 账户余额' : s.name
         return { label: mark + kind + best + name, run: function () { setSource(s.id) } }
       }).concat([{ label: '返回', sub: mainMenu }])
     } },
@@ -2054,7 +2959,7 @@ function mainMenu() {
       postLedger(on ? 'disable' : 'enable')
     } },
     { label: '结束计费并结算' +
-        (ledgerCache && ledgerCache.total ? '（¥' + fenString(Math.round(ledgerCache.total * 100)) + '）' : ''),
+        (ledgerCache && ledgerCache.total ? '（¥' + moneyString(toUnits(ledgerCache.total)) + '）' : ''),
       disabled: !(ledgerCache && ledgerCache.turns > 0),
       run: function () {
         postLedger('settle').then(function (p) {
@@ -2063,6 +2968,20 @@ function mainMenu() {
       } },
     { label: (holidayStatus && holidayStatus.level !== 'ok' ? '⚠ ' : '') + '节假日清单…',
       run: function () { showHolidayPanel() } },
+    { label: '扣费步长（每 ' + stepLabel() + ' 元提示一次）▸', sub: function () {
+      var rows = STEP_PRESETS.map(function (v) {
+        var units = toUnits(v)
+        return {
+          label: (stepUnits() === units ? '✓ ' : '　') + '¥' + moneyString(units) +
+            (v === 0.01 ? '（1 分）' : ''),
+          run: function () { setStep(v) },
+        }
+      })
+      rows.push({ sep: true })
+      rows.push({ label: '自定义步长…', run: function () { askStep() } })
+      rows.push({ label: '返回', sub: mainMenu })
+      return rows
+    } },
     { label: '尺寸 ▸', sub: function () {
       // 命名与「带 px 标注」沿用上游；本插件多一档小号，所以是四档
       return SIZE_PRESETS.map(function (px, i) {
@@ -2084,24 +3003,41 @@ function mainMenu() {
         { label: '返回', sub: mainMenu },
       ]
     } },
-    { label: '声音 ▸', sub: function () {
-      var items = [
-        { label: (state.soundOn ? '✓ ' : '　') + '开启声音', run: function () { setSoundOn(!state.soundOn) } },
+    { label: '功能选择 ▸', sub: function () {
+      return [
+        { label: (state.fxBowlDrop ? '✓ ' : '　') + '充值后掉落米饭盆，手动拖取',
+          run: function () { setFx('bowl', !state.fxBowlDrop) } },
+        { label: (state.fxPat ? '✓ ' : '　') + '鼠标抚摸会开心',
+          run: function () { setFx('pat', !state.fxPat) } },
+        { label: (state.fxHurt ? '✓ ' : '　') + '扣费时播放音效与动画',
+          run: function () { setFx('hurt', !state.fxHurt) } },
         { sep: true },
-        { label: '音量大小', header: true },
+        { label: '关掉后对应的事情不再发生，演示也一视同仁', disabled: true },
+        { label: '返回', sub: mainMenu },
       ]
-      VOLUME_STEPS.forEach(function (v) {
-        items.push({
-          label: (state.volume === v ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
-          run: function () { setVolume(v) },
-        })
-      })
-      items.push({ sep: true })
-      items.push({ label: '自定义音量…', run: function () { askVolume() } })
-      items.push({ label: '返回', sub: mainMenu })
-      return items
     } },
-    { label: (state.snapOnRelease ? '✓ ' : '　') + '松手吸附左下角', run: function () { state.snapOnRelease = !state.snapOnRelease; saveState() } },
+    { label: '声音 ▸', sub: soundMenu },
+    { label: '松手吸附 ▸', sub: function () {
+      function row(label, on, corner, off) {
+        return {
+          label: (on ? '✓ ' : '　') + label,
+          run: function () {
+            state.snapOnRelease = !off
+            if (corner) state.snapCorner = corner
+            saveState()
+            if (corner) snapToCorner()
+          },
+        }
+      }
+      return [
+        row('吸附到左下角', state.snapOnRelease && state.snapCorner === 'left', 'left', false),
+        row('吸附到右下角', state.snapOnRelease && state.snapCorner === 'right', 'right', false),
+        row('关闭（松手停在原地）', !state.snapOnRelease, null, true),
+        { sep: true },
+        { label: '吸附回' + cornerName(), run: function () { snapToCorner() } },
+        { label: '返回', sub: mainMenu },
+      ]
+    } },
     { label: '刷新间隔 ▸', sub: function () {
       var names = { 10: '10 秒', 30: '30 秒', 60: '1 分钟', 300: '5 分钟' }
       return POLL_OPTIONS.map(function (s) {
@@ -2114,27 +3050,120 @@ function mainMenu() {
         }
       }).concat([{ label: '返回', sub: mainMenu }])
     } },
-    { label: '立即刷新余额', run: function () { pollOnce(true, true) } },
+    { label: '立即刷新余额', run: function () { pollOnce(false, true) } },
     { label: '网络自检…', run: function () { showSelfCheck() } },
-    { label: '测试一次扣费', run: function () { playDemo(1) } },
-    { label: '测试充值（掉米饭盆）', run: function () { spawnRice(1); if (rice) rice.y = side * 0.2 } },
-    { label: (radarOn ? '✓ ' : '　') + '打开火控雷达', run: function () { radarOn = !radarOn; wake() } },
-    { label: '演示连续扣费 ▸', sub: function () {
+    { label: '测试一次扣费（-' + stepLabel() + '）', run: function () { playDemo(1) } },
+    { label: '测试充值 ▸', sub: function () {
+      var tail = state.fxBowlDrop ? '（掉一个米饭盆）' : '（仅演示，不掉盆）'
       return [
-        { label: '-0.05（5 次）', run: function () { playDemo(5) } },
-        { label: '-0.10（10 次）', run: function () { playDemo(10) } },
-        { label: '-0.20（20 次）', run: function () { playDemo(20) } },
-        { label: '-0.50（50 次）', run: function () { playDemo(50) } },
-        { label: '-1.00（100 次）', run: function () { playDemo(100) } },
+        { label: '¥3.00' + tail, run: function () { testTopUp(3) } },
+        { label: '¥10.00' + tail, run: function () { testTopUp(10) } },
+        { label: '¥50.00' + tail, run: function () { testTopUp(50) } },
+        { sep: true },
+        { label: '自定义金额…', run: function () { askTopUp() } },
         { label: '返回', sub: mainMenu },
       ]
     } },
-    { label: '吸附回左下角', run: function () { snapToCorner() } },
+    { label: (radarOn ? '✓ ' : '　') + '打开火控雷达', run: function () { radarOn = !radarOn; wake() } },
+    { label: '演示连续扣费 ▸', sub: function () {
+      return [1, 5, 10, 20, 50, 100].map(function (n) {
+        return {
+          label: '扣 ' + n + ' 次（-' + moneyString(stepUnits() * n) + '）',
+          run: function () { playDemo(n) },
+        }
+      }).concat([
+        { sep: true },
+        { label: '自定义次数…', run: function () { askDemoCount() } },
+        { label: '返回', sub: mainMenu },
+      ])
+    } },
+    { label: '吸附回' + cornerName(), run: function () { snapToCorner() } },
     // 隐藏前就把恢复方式写在菜单上 —— 否则用户点完「隐藏桌宠」才知道自己进了死胡同
     { label: state.hidden ? '显示桌宠' : '隐藏桌宠　（Ctrl+Shift+H 可恢复）', run: function () { setHidden(!state.hidden) } },
     { label: '关于…', run: function () { showAbout() } },
   ]
   return items
+}
+
+// 声音菜单：保留旧版的「全部音量」，另外每个音效都能单独调音量 / 换自定义音频。
+function soundMenu() {
+  var items = [
+    { label: (state.soundOn ? '✓ ' : '　') + '开启声音', run: function () { setSoundOn(!state.soundOn) } },
+    { sep: true },
+    { label: '全部音效音量', header: true },
+  ]
+  VOLUME_STEPS.forEach(function (v) {
+    items.push({
+      label: (allCuesAt(v) ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
+      run: function () { setVolume(v) },
+    })
+  })
+  items.push({ label: '自定义音量…', run: function () { askVolume() } })
+  items.push({ sep: true })
+  items.push({ label: '单独音效（音量 / 自定义）', header: true })
+  for (var i = 0; i < CUE_IDS.length; i++) {
+    ;(function (id) {
+      var custom = state.cueCustom[id]
+      items.push({
+        label: CUE_LABELS[id] + '（' + cueVolume(id) + ' %' + (custom ? ' · 自定义' : '') + '）▸',
+        sub: function () { return cueMenu(id) },
+      })
+    })(CUE_IDS[i])
+  }
+  items.push({ label: '返回', sub: mainMenu })
+  return items
+}
+
+function cueMenu(id) {
+  var custom = state.cueCustom[id]
+  var items = [
+    { label: '「' + CUE_LABELS[id] + '」音量', header: true },
+  ]
+  VOLUME_STEPS.forEach(function (v) {
+    items.push({
+      label: (cueVolume(id) === v ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
+      run: function () { setCueVolume(id, v) },
+    })
+  })
+  items.push({ label: '自定义音量…', run: function () { askCueVolume(id) } })
+  items.push({ sep: true })
+  items.push({ label: '试听（音量 ' + cueVolume(id) + ' %）', run: function () { previewCue(id) } })
+  items.push({ label: '上传自定义音效…（mp3/wav/ogg/m4a/aac/flac/webm）', run: function () { pickCustomCue(id) } })
+  items.push({
+    label: custom ? '当前：' + custom.name : '当前：出厂音效',
+    disabled: true,
+  })
+  items.push({
+    label: '恢复出厂音效',
+    disabled: !custom,
+    run: function () { restoreFactoryCue(id) },
+  })
+  items.push({ label: '返回', sub: soundMenu })
+  return items
+}
+
+function askCueVolume(id) {
+  showPrompt({
+    title: CUE_LABELS[id] + '音量',
+    label: '只调整这一个音效（0 ~ 100）。0% 等于关掉它，不影响其它音效。',
+    value: cueVolume(id),
+    suffix: '%',
+    onOk: function (v, msg) {
+      if (!/^\d+$/.test(v)) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入 0 ~ 100 的整数'
+        return false
+      }
+      var n = parseInt(v, 10)
+      if (n < 0 || n > 100) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '超出范围：' + n + '（应在 0 ~ 100 之间）'
+        return false
+      }
+      setCueVolume(id, n)
+      return true
+    },
+  })
 }
 
 // 「隐藏」之后的恢复菜单。
@@ -2663,27 +3692,7 @@ function unlockAudio() {
   document.removeEventListener('keydown', unlockAudio, true)
 }
 
-function playSoundFile(which) {
-  try {
-    // 音量统一在这里施加：0% 就是静音，所以音量 0 时直接不发声音
-    var vol = state.soundOn ? Math.max(0, Math.min(100, state.volume)) / 100 : 0
-    if (vol <= 0) return
-    if (which === 'turn') {
-      if (!turnSound) { turnSound = new Audio(PREFIX + '/sound/turn.mp3'); turnSound.preload = 'auto' }
-      turnSound.volume = vol
-      try { turnSound.currentTime = 0 } catch (e) {}
-      var p = turnSound.play()
-      if (p && p.catch) p.catch(function () {})
-      return
-    }
-    // 结算音 13.5 MB：**绝不预加载**，只在结算页真的打开时才创建并拉取
-    if (!settleSound) { settleSound = new Audio(PREFIX + '/sound/settle.mp3'); settleSound.preload = 'none' }
-    settleSound.volume = vol
-    try { settleSound.currentTime = 0 } catch (e) {}
-    var p2 = settleSound.play()
-    if (p2 && p2.catch) p2.catch(function () {})
-  } catch (err) {}
-}
+function playSoundFile(which) { playCue(which) }
 
 // —— 喜报气泡：DOM 挂在角色上方，不被画布裁切 ——
 function showTurnBubble(text1, text2, modifier) {
@@ -2716,13 +3725,13 @@ function showTurnBubble(text1, text2, modifier) {
 }
 
 function onNewTurn(t) {
-  var cents = Math.round(Number(t.amount) * 100)
-  if (!isFinite(cents) || cents <= 0) return // 消耗为 0 的回合不提示也不记账
+  var units = toUnits(t.amount)
+  if (!isFinite(units) || units <= 0) return // 消耗为 0 的回合不提示也不记账
   var sym = currencySymbol(String(t.currency || 'CNY').toUpperCase())
-  showTurnBubble('喜报', '您本次消耗了 ' + sym + fenString(cents))
+  showTurnBubble('喜报', '您本次消耗了 ' + sym + moneyString(units))
   celebrateTime = CELEBRATE_DURATION // 红闪庆祝（复用原版的 source-atop 红叠加）
   wake()
-  playSoundFile('turn')
+  playCue('turn')
 }
 
 function pollTurn() {
@@ -2790,7 +3799,6 @@ function closeSettlement() {
   try { document.removeEventListener('keydown', o.onKey, true) } catch (err) {}
   try { window.removeEventListener('resize', o.onResize) } catch (err) {}
   try { if (o.root.parentNode) o.root.parentNode.removeChild(o.root) } catch (err) {}
-  try { if (settleSound) settleSound.pause() } catch (err) {}
 }
 
 function layoutSettlement() {
@@ -2853,9 +3861,9 @@ function showSettlement(p) {
     bodyEl.appendChild(none)
   }
   for (var i = 0; i < models.length; i++) {
-    bodyEl.appendChild(certRow(models[i].name, '¥' + fenString(Math.round(Number(models[i].amount) * 100))))
+    bodyEl.appendChild(certRow(models[i].name, '¥' + moneyString(toUnits(models[i].amount))))
   }
-  var tot = certRow('合计', '¥' + fenString(Math.round(Number(p.total) * 100)))
+  var tot = certRow('合计', '¥' + moneyString(toUnits(p.total)))
   tot.className = 'dshpet-cert-total'
   bodyEl.appendChild(tot)
 
@@ -3018,6 +4026,13 @@ function injectCss() {
       'font-family:ui-monospace,Consolas,monospace}' +
     '.dshpet-prompt-inp:focus{outline:none;border-color:#4176e6;box-shadow:0 0 0 2px rgba(65,118,230,.18)}' +
     '.dshpet-prompt-suf{color:#6b7ba8;font-weight:700}' +
+    // 轻量提示条（音效上传反馈）
+    '#dshpet-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:32000;' +
+      'display:none;max-width:min(560px,90vw);box-sizing:border-box;padding:9px 14px;border-radius:9px;' +
+      'background:rgba(24,32,52,.94);color:#fff;font-size:12.5px;line-height:1.45;' +
+      'font-family:system-ui,"Segoe UI",sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.35);' +
+      'white-space:pre-wrap;word-break:break-word}' +
+    '#dshpet-toast.is-err{background:rgba(150,30,40,.95)}' +
     // 许可证阅读弹层（应用内显示，不依赖浏览器打开）
     '#dshpet-license{position:fixed;inset:0;z-index:31400;background:rgba(0,0,0,.6);display:flex;' +
       'align-items:center;justify-content:center}' +
@@ -3077,6 +4092,11 @@ function setHidden(h) {
   var wasHidden = state.hidden
   state.hidden = !!h
   saveState()
+  if (state.hidden) {
+    stopPat()
+    patPointerOn = false
+    patSeen = false
+  }
   if (container) container.style.display = state.hidden ? 'none' : 'block'
   if (menuEl.root) menuEl.root.style.display = 'none'
   // 恢复显示时要把位置与画面重新拾起来：隐藏期间帧循环可能已经停了，
@@ -3139,7 +4159,7 @@ function start() {
       layout()
       place()
       // 立绘 / 表情 / 充值玩法的素材一起加载
-      return Promise.all([refreshAssets(), loadExpressionArt(), loadTopupArt()])
+      return Promise.all([refreshAssets(), loadExpressionArt(), loadTopupArt(), loadPatArt(), loadCustomClips()])
     })
     .then(function () {
       draw()

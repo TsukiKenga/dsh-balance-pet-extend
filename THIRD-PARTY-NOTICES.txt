@@ -44,11 +44,13 @@ VK-1                                        ← 最初的原作者
     程序代码  各版本目录下的 .ps1 / .vbs / .cmd
     角色美术  大肥鱼桌宠改_D-16BVM/ 下的 sprite.png、sprites/*.png、
               rice.png、iron_bowl.png
-    音效      hit.mp3、feed.mp3
+    音效      hit.mp3、feed.mp3、pot_land.mp3、pot_off.mp3
 
   本插件的用途：表情系统、米饭盆充值玩法、铁锅扣头与火控雷达，移植自这一版里的
   「大肥鱼桌宠改」（Windows / PowerShell 版，目录 大肥鱼桌宠改_D-16BVM）。
-  该目录下的米饭盆、铁锅与音效素材按 MIT 使用，随包分发合法。
+  v1.8.0 起还从该版本的 windows/ 目录逐字节复制了 pot_land.mp3 / pot_off.mp3
+  与 windows/sprites/pat_hand_0..4.png（摸头手部 5 帧）。
+  该目录下的米饭盆、铁锅、手部与音效素材按 MIT 使用，随包分发合法。
 
   注意  MIT 要求再分发时保留版权与许可声明，因此 licenses/VK-1-LICENSE.txt
         必须随包一起发布，不要删除。
@@ -116,6 +118,10 @@ DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
       来源     VK-1 v2「大肥鱼桌宠改_D-16BVM」根目录，逐字节复制
       权利状态 MIT（VK-1 LICENSE 明确覆盖）—— 可随包分发
 
+  assets/sprites/pat_hand_0.png ~ pat_hand_4.png
+      来源     VK-1 windows/sprites/，逐字节复制（摸头手势的 5 帧手部）
+      权利状态 MIT（VK-1 LICENSE 明确覆盖「角色美术」）—— 可随包分发
+
   原始的逐文件 SHA-256 记录在 dsh-balance-pet-macos/Resources/README.md。
 
   注：以上 VK-1 v2 的素材（四张表情 + 米饭盆 + 铁锅）都来自同一个上游项目。
@@ -134,6 +140,14 @@ DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
   assets/feed.mp3
       来源     VK-1 v2「大肥鱼桌宠改_D-16BVM」（投喂米饭盆的提示音），逐字节复制
       权利状态 MIT（VK-1 LICENSE 明确覆盖 feed.mp3）—— 可随包分发
+
+  assets/pot_land.mp3
+      来源     VK-1 windows/（铁锅扣到头上），逐字节复制
+      权利状态 MIT（VK-1 LICENSE 明确覆盖音效）—— 可随包分发
+
+  assets/pot_off.mp3
+      来源     VK-1 windows/（双击头部取下铁锅），逐字节复制
+      权利状态 MIT（VK-1 LICENSE 明确覆盖音效）—— 可随包分发
 
   assets/congrats-turn.mp3
       来源     vjshi 音效库
@@ -159,7 +173,9 @@ DSH-DaFeiYu-Desktop-Pet                     ← fork 自 VK-1 的 Mac 分支
       licenses/DeepSeek-Balance-Whale-*       MIT，而且必须一起带
       assets/expr/*.png                       原图来自 VK-1（MIT），现版为维护者重绘
       assets/rice.png / assets/iron_bowl.png  VK-1 LICENSE 明确覆盖，MIT
+      assets/sprites/pat_hand_*.png           VK-1 LICENSE 明确覆盖「角色美术」，MIT
       assets/hit.mp3 / assets/feed.mp3        VK-1 LICENSE 明确覆盖，MIT
+      assets/pot_land.mp3 / assets/pot_off.mp3 VK-1 LICENSE 明确覆盖音效，MIT
       assets/sprites/kimi.png                 维护者自有
 
   需先确认或替换
