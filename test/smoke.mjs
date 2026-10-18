@@ -114,6 +114,19 @@ function makeCtx(record = true) {
         if (!record) return () => {}
         return function (x, y, w, h) { FILLS.push({ style: this.fillStyle, x: x, y: y, w: w, h: h }) }
       }
+      // 形变 / 镜像只能从 canvas 的变换调用里观察：
+      //   scale(-1, 1)          → 立绘整只镜像
+      //   scale(sx, sy)         → 摸头的 petpet 弹性（sx>1、sy<1）
+      //   transform(1,0,0,sy,..) → 铁锅回弹 / 平板跟随的竖直形变
+      //   transform(a,b,c,d,..)  → 平板仿射矩阵；镜像后 c 由正变负
+      if (k === 'scale') {
+        if (!record) return () => {}
+        return (x, y) => { SCALES.push({ x: x, y: y }) }
+      }
+      if (k === 'transform') {
+        if (!record) return () => {}
+        return function (a, b, c, d) { TRANSFORMS.push([a, b, c, d]) }
+      }
       if (k === 'createLinearGradient' || k === 'createRadialGradient') return () => ({ addColorStop() {} })
       // 掩码：贴近真实立绘的分布 ——
       //   上方 20% 只有「头」（偏右，x 0.56..0.80）
@@ -154,6 +167,8 @@ const LOGS = []         // 插件内部 console 输出（调试用）
 const TEXTS = []        // 被 fillText 画出的文字（雷达名牌读数）
 const FILLS = []        // 被 fillRect 画出的矩形（平板背景色）
 const ARCS = []         // 被 arc 画出的圆（雷达方向环）
+const SCALES = []       // 被 scale() 施加的缩放（镜像 / 摸头弹性）
+const TRANSFORMS = []   // 被 transform() 施加的矩阵（铁锅回弹 / 平板跟随形变 / 平板仿射）
 let vnow = 0            // 虚拟时钟（毫秒）
 function makeEnv() {
   const documentEl = new El('html')
@@ -419,11 +434,35 @@ await openMenu()
 eq('切回浅色后去掉 is-dark', menuRoot.className, '')
 
 console.log('')
-console.log('=== 一期：声音（档位 + 0% 即静音）===')
+console.log('=== 声音：先选「是否分音效调节音量」 ===')
 await openMenu()
 click(rowBy(menuRoot, '声音'))
 await flush(6)
-const soundRows = rowsOf(menuRoot).map((r) => r.textContent)
+let soundRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('有「分音效调节音量」开关', soundRows.some((s) => s.includes('分音效调节音量')), soundRows.join(' | '))
+ok('默认按分音效显示（6 个音效都在）', ['受击（扣费）', '投喂米饭盆', '铁锅扣头', '取下铁锅', '回合结束喜报', '结算证书']
+  .every((s) => soundRows.some((r) => r.includes(s))), soundRows.join(' | '))
+ok('分音效模式不显示「全部音量」档位', !soundRows.some((s) => s.includes('0%（静音）')), soundRows.join(' | '))
+
+// 关掉分音效 → 音量只剩全部档位，但**自定义音频栏仍然显示**
+click(rowBy(menuRoot, '分音效调节音量')); await flush(6)
+await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
+soundRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('关掉分音效后显示「全部音效音量」',
+  menuRoot.children.some((c) => c.className === 'dshpet-mhead' && c.textContent.includes('全部音效音量')) &&
+  soundRows.some((s) => s.includes('0%（静音）')), soundRows.join(' | '))
+ok('自定义音频栏在不勾选时也显示（6 个音效）',
+  menuRoot.children.some((c) => c.className === 'dshpet-mhead' && c.textContent.includes('单独音效（自定义音频）')) &&
+  ['受击（扣费）', '投喂米饭盆', '铁锅扣头', '取下铁锅', '回合结束喜报', '结算证书']
+    .every((s) => soundRows.some((r) => r.includes(s) && r.includes('（出厂）'))), soundRows.join(' | '))
+// 全局模式下进一个音效：只有自定义音频，没有逐个音效的音量档位
+click(rowBy(menuRoot, '受击（扣费）')); await flush(6)
+const audioOnlyRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('全局模式下音效子菜单只保留自定义音频',
+  audioOnlyRows.some((r) => r.includes('上传自定义音效')) && audioOnlyRows.some((r) => r.includes('试听')) &&
+  !audioOnlyRows.some((r) => r.includes('25 %')) && !audioOnlyRows.some((r) => r.includes('自定义音量')),
+  audioOnlyRows.join(' | '))
+click(rowBy(menuRoot, '返回')); await flush(6)
 ok('有音量分组标题', menuRoot.children.some((c) => c.className === 'dshpet-mhead'), menuRoot.children.filter((c) => c.className === 'dshpet-mhead').map((c) => c.textContent).join(','))
 ok('有 5 个档位（含 0% 静音）', soundRows.some((s) => s.includes('0%（静音）')) && soundRows.some((s) => s.includes('100 %')), soundRows.join(' | '))
 ok('有「自定义音量…」', !!rowBy(menuRoot, '自定义音量'))
@@ -438,6 +477,15 @@ click(rowBy(menuRoot, '75 %')); await flush(6)
 await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
 ok('选 75% 后打勾落在 75%', rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 75 %')), rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
 ok('选 75% 后「开启音效」恢复打勾', rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 开启音效')))
+
+// 切回分音效模式：后面要测每个音效的独立音量
+click(rowBy(menuRoot, '分音效调节音量')); await flush(6)
+await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
+soundRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('切回分音效模式后重新显示 6 个音效（带音量）', ['受击（扣费）', '投喂米饭盆', '铁锅扣头', '取下铁锅', '回合结束喜报', '结算证书']
+  .every((s) => soundRows.some((r) => r.includes(s))) &&
+  soundRows.some((s) => s.includes('受击（扣费）（75 %）')) &&
+  !soundRows.some((s) => s.includes('0%（静音）')), soundRows.join(' | '))
 
 console.log('')
 console.log('=== 每个音效独立音量 / 自定义音效 ===')
@@ -456,7 +504,7 @@ await openMenu(); click(rowBy(menuRoot, '测试一次扣费')); await advance(0.
 const hitPlays = AUDIO_VOLUMES.filter((x) => x.src.includes('hit.mp3'))
 ok('受击音效按自己的 25% 音量播放', hitPlays.length > 0 && Math.abs(hitPlays[hitPlays.length - 1].volume - 0.25) < 1e-9,
   hitPlays.length ? String(hitPlays[hitPlays.length - 1].volume) : '(无播放)')
-// 还原 80%
+// 还原 75%
 await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
 click(rowBy(menuRoot, '受击（扣费）')); await flush(6)
 click(rowBy(menuRoot, '75 %')); await flush(6)
@@ -466,9 +514,9 @@ console.log('=== 关闭音效后下方选项不可用 ===')
 await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
 click(rowBy(menuRoot, '开启音效')); await flush(6)
 await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
-const offVolume = rowBy(menuRoot, '75 %')
-ok('关闭后音量档位不可点', !!offVolume && offVolume.style.cursor === 'default' &&
-  String(offVolume.style.opacity) === '.45', offVolume ? offVolume.style.opacity : '(missing)')
+const offCue = rowBy(menuRoot, '受击（扣费）')
+ok('关闭后分音效条目不可点', !!offCue && offCue.style.cursor === 'default' &&
+  String(offCue.style.opacity) === '.45', offCue ? offCue.style.opacity : '(missing)')
 ok('关闭后有提示文案', rowsOf(menuRoot).some((r) => r.textContent.includes('音效已关闭')))
 AUDIO_PLAYED.length = 0
 await openMenu(); click(rowBy(menuRoot, '测试一次扣费')); await advance(0.1)
@@ -498,11 +546,74 @@ ok('峰价为红色背景', FILLS.some((f) => f.style === '#c62828' && f.w > 300
   FILLS.filter((f) => f.w > 300).map((f) => f.style).join(' | '))
 ok('峰谷彩蛋带剩余时长', TEXTS.some((t) => /^距谷时 \d+:\d{2}:\d{2}$/.test(t.text)),
   [...new Set(TEXTS.map((t) => t.text))].join(' | '))
-// 只显示 1 秒：到点自动回余额，不用再点
+// 布局按需求收紧成两行：梁文峰 / 距谷时（不再有「峰谷时段」标题行）
+TEXTS.length = 0
+await oneFrame()
+const tariffLines = TEXTS.map((t) => t.text)
+ok('峰谷视图只有两行（没有「峰谷时段」标题）',
+  tariffLines.includes('梁文峰') && tariffLines.some((s) => /^距谷时 \d+:\d{2}:\d{2}$/.test(s)) &&
+  !tariffLines.includes('峰谷时段'), tariffLines.join(' | '))
+// 默认显示 2.5 秒：1.2 秒时还在，2.5 秒后自动回余额
 await advance(1.2)
-const tariffTail = TEXTS.slice(-6).map((t) => t.text)
-ok('峰谷彩蛋 1 秒后自动回到余额', !tariffTail.includes('梁文峰') && tariffTail.includes('12.34'),
+const stillTariff = TEXTS.slice(-6).map((t) => t.text)
+ok('默认 2.5 秒内仍显示峰谷', stillTariff.includes('梁文峰'), stillTariff.join(' | '))
+await advance(1.6)
+const tariffTail = TEXTS.slice(-4).map((t) => t.text)
+ok('默认 2.5 秒后自动回到余额', !tariffTail.includes('梁文峰') && tariffTail.includes('12.34'),
   tariffTail.join(' | '))
+
+console.log('')
+console.log('=== 平板峰谷显示时长可调 ===')
+await openMenu()
+ok('菜单有「平板峰谷时长」', !!rowBy(menuRoot, '平板峰谷时长'), rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+ok('默认显示 2.5 秒', rowBy(menuRoot, '平板峰谷时长').textContent.includes('2.5 秒'),
+  rowBy(menuRoot, '平板峰谷时长').textContent)
+click(rowBy(menuRoot, '平板峰谷时长')); await flush(6)
+const tariffRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('有 1 / 2 / 2.5 / 3 / 5 / 10 秒六档',
+  ['1 秒', '2 秒', '2.5 秒', '3 秒', '5 秒', '10 秒'].every((s) => tariffRows.some((r) => r.includes(s))),
+  tariffRows.join(' | '))
+ok('当前 2.5 秒打勾', tariffRows.some((r) => r.includes('✓ 2.5 秒')), tariffRows.join(' | '))
+click(rowBy(menuRoot, '5 秒')); await flush(6)
+await openMenu()
+ok('选 5 秒后菜单标题跟着变', rowBy(menuRoot, '平板峰谷时长').textContent.includes('5 秒'),
+  rowBy(menuRoot, '平板峰谷时长').textContent)
+// 自定义时长：小于 0.5 秒被拒绝，1.5 秒生效
+click(rowBy(menuRoot, '平板峰谷时长')); await flush(6)
+click(rowBy(menuRoot, '自定义时长')); await flush(6)
+const tPrompt = doc.body.children.filter((c) => c.id === 'dshpet-prompt')[0]
+const tBox = tPrompt && tPrompt.children[0]
+const tInp = tBox && tBox.children.filter((c) => c.className === 'dshpet-prompt-row')[0].children[0]
+const tMsg = tBox && tBox.children.filter((c) => c.className.indexOf('dshpet-hol-msg') === 0)[0]
+const tOk = tBox && tBox.children.filter((c) => c.className.indexOf('dshpet-hol-actions') >= 0)[0].children[0]
+tInp.value = '0.2'
+click(tOk); await flush(4)
+ok('时长小于 0.5 秒被拒绝', !!tMsg.textContent && /0\.5/.test(tMsg.textContent), tMsg.textContent)
+tInp.value = '1.5'
+click(tOk); await flush(4)
+await openMenu()
+ok('自定义 1.5 秒生效', rowBy(menuRoot, '平板峰谷时长').textContent.includes('1.5 秒'),
+  rowBy(menuRoot, '平板峰谷时长').textContent)
+// 关掉菜单，点平板验证自定义时长真的生效
+doc.fire('pointerdown', { button: 0, clientX: 5, clientY: 5 })
+await flush(4)
+TEXTS.length = 0
+const tp2 = tabletPoint()
+if (tp2) {
+  doc.fire('pointerdown', { button: 0, clientX: tp2.x, clientY: tp2.y })
+  win.fire('pointerup', { clientX: tp2.x, clientY: tp2.y })
+  await flush(8)
+  await advance(0.3)
+}
+ok('自定义 1.5 秒时峰谷已显示', TEXTS.some((t) => t.text === '梁文峰'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+await advance(1.5)
+const customTail = TEXTS.slice(-4).map((t) => t.text)
+ok('自定义 1.5 秒后回到余额', !customTail.includes('梁文峰') && customTail.includes('12.34'),
+  customTail.join(' | '))
+// 恢复默认 2.5 秒
+await openMenu(); click(rowBy(menuRoot, '平板峰谷时长')); await flush(6)
+click(rowBy(menuRoot, '2.5 秒')); await flush(6)
 
 console.log('')
 console.log('=== 自定义扣费步长 ===')
@@ -601,6 +712,23 @@ click(rowBy(menuRoot, '吸附到右下角')); await advance(0.3)
 const rootSnap = doc.body.children.filter((c) => c.id === 'dshpet-root')[0]
 ok('选右下角后真的吸附过去', parseFloat(rootSnap.style.left) > win.innerWidth * 0.5,
   'left=' + rootSnap.style.left)
+// 右边 = 整只角色镜像：立绘 scale(-1,1)、平板四边形也翻到另一只手；文字仍然正着。
+SCALES.length = 0
+TRANSFORMS.length = 0
+TEXTS.length = 0
+const tpm = tabletPointMirrored()
+if (tpm) {
+  doc.fire('pointerdown', { button: 0, clientX: tpm.x, clientY: tpm.y })
+  win.fire('pointerup', { clientX: tpm.x, clientY: tpm.y })
+  await flush(8)
+  await advance(0.1)
+}
+ok('右下角时整只立绘镜像（scale -1,1）', SCALES.some((s) => s.x === -1 && s.y === 1),
+  SCALES.map((s) => s.x + ',' + s.y).join(' | '))
+ok('右下角时平板几何也镜像（仿射矩阵 c 变负）', TRANSFORMS.some((m) => m[2] < -0.005),
+  TRANSFORMS.slice(0, 12).map((m) => m.map((v) => v.toFixed(3)).join(',')).join(' | '))
+ok('镜像后点平板仍然点得到（峰谷视图）', TEXTS.some((t) => t.text === '梁文峰'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
 // 关闭吸附后松手不再自动回角
 await openMenu(); click(rowBy(menuRoot, '松手吸附')); await flush(6)
 click(rowBy(menuRoot, '关闭')); await flush(6)
@@ -609,13 +737,20 @@ const snapOffRows = rowsOf(menuRoot).map((r) => r.textContent)
 ok('关闭吸附后不再勾选左 / 右下角', snapOffRows.some((r) => r.includes('✓ 关闭')) &&
   !snapOffRows.some((r) => r.includes('✓ 吸附到左') || r.includes('✓ 吸附到右')), snapOffRows.join(' | '))
 await openMenu(); click(rowBy(menuRoot, '松手吸附')); await flush(6)
+SCALES.length = 0
+TRANSFORMS.length = 0
 click(rowBy(menuRoot, '吸附到左下角')); await advance(0.3)
+ok('回到左下角后取消镜像', !SCALES.some((s) => s.x === -1 && s.y === 1) &&
+  TRANSFORMS.some((m) => m[2] > 0.005),
+  SCALES.map((s) => s.x + ',' + s.y).join(' | ') + ' / ' +
+  TRANSFORMS.slice(0, 12).map((m) => m.map((v) => v.toFixed(3)).join(',')).join(' | '))
 
 console.log('')
 console.log('=== 摸头手势（petpet 手部动画）===')
 await advance(1.2)                  // 清掉点击造成的摸头封锁
 const prPat = petRect()
 DRAWS.length = 0
+SCALES.length = 0
 if (prPat) {
   // 在她身上来回划动：每帧都派发 pointermove
   for (let i = 0; i < 40; i++) {
@@ -630,8 +765,16 @@ if (prPat) {
 }
 ok('摸头后画出手部素材', DRAWS.some((d) => d.src.includes('/pat/pat_hand_')),
   [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
-ok('摸头时是开心表情（expression_11）', DRAWS.some((d) => d.src.includes('expression_11')),
+// 摸头时切的是 expression_22（上游 EXPR_NERVOUS），不是常态笑脸。
+// 注意要先清空再取一帧：整段划动里前半段还没进入摸头状态，会把 expression_11 一起记进来。
+DRAWS.length = 0
+await oneFrame()
+ok('摸头时立绘切到 expression_22', DRAWS.some((d) => d.src.includes('expression_22')) &&
+  !DRAWS.some((d) => d.src.includes('expression_11')),
   [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+ok('摸头有 petpet 弹性形变（横向变宽 + 竖向压扁）',
+  SCALES.some((s) => s.x > 1.01 && s.y < 0.99),
+  SCALES.slice(-12).map((s) => s.x.toFixed(3) + 'x' + s.y.toFixed(3)).join(' | '))
 // 指针离开后手要收起
 doc.fire('pointermove', { buttons: 0, clientX: 5, clientY: 5 })
 await advance(0.4)
@@ -740,6 +883,10 @@ function lastRiceCenter() {
   const d = DRAWS.filter((x) => x.src.includes('rice.png')).slice(-1)[0]
   return d ? { x: d.x + d.w / 2, y: d.y + d.h / 2 } : null
 }
+function lastIronCenter() {
+  const d = DRAWS.filter((x) => x.src.includes('iron_bowl.png')).slice(-1)[0]
+  return d ? { x: d.x + d.w / 2, y: d.y + d.h / 2 } : null
+}
 // 一帧里画了几个盆（去重：同一个盆只会出现一次）
 function riceBowls() {
   const out = []
@@ -769,6 +916,13 @@ function tabletPoint() {
   if (!pr) return null
   const s = pr.w / 1536
   return { x: pr.x + 1251.5 * s, y: pr.y + 766.5 * s }
+}
+// 镜像到右半边后，平板中心 x 变成 1536 - 1251.5（y 不变）
+function tabletPointMirrored() {
+  const pr = petRect()
+  if (!pr) return null
+  const s = pr.w / 1536
+  return { x: pr.x + (1536 - 1251.5) * s, y: pr.y + 766.5 * s }
 }
 function spawnOne(amountLabel) {
   return openMenu().then(() => {
@@ -875,13 +1029,28 @@ if (toFeed && pr0) {
 ok('把盆拖到她身上会投喂（播放 feed.mp3）',
   AUDIO_PLAYED.some((s) => s.includes('feed.mp3')), AUDIO_PLAYED.join(',') || '(无音效)')
 
-// ⑥ 投喂后掉下铁锅，并扣在她头上
+// ⑥ 投喂后空锅先掉到地上；第二次拖回她身上才会扣头
 DRAWS.length = 0
 await advance(3.5)
 ok('投喂后掉下铁锅（画了 iron_bowl.png）', DRAWS.some((d) => d.src.includes('iron_bowl.png')),
   DRAWS.some((d) => d.src.includes('iron_bowl.png')) ? '有' : '无')
-ok('铁锅扣头时切到平静表情（expression_21）', DRAWS.some((d) => d.src.includes('expression_21')),
+ok('空锅先落在地上，不自动扣头', !DRAWS.some((d) => d.src.includes('expression_21')),
   [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+const ironPos = lastIronCenter()
+const prPot = petRect()
+AUDIO_PLAYED.length = 0
+TRANSFORMS.length = 0
+if (ironPos && prPot) {
+  await dragBowl(ironPos, { x: prPot.x + prPot.w * 0.68, y: prPot.y + prPot.h * 0.12 })
+  await advance(0.3)
+}
+ok('第二次拖回她身上才扣头（expression_21）', DRAWS.some((d) => d.src.includes('expression_21')),
+  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+ok('铁锅扣头时有回弹形变（竖直压缩、水平不变）',
+  TRANSFORMS.some((m) => Math.abs(m[0] - 1) < 1e-9 && Math.abs(m[1]) < 1e-9 &&
+    Math.abs(m[2]) < 1e-9 && Math.abs(m[3] - 1) > 0.01),
+  TRANSFORMS.slice(0, 10).map((m) => m.map((v) => v.toFixed(3)).join(',')).join(' | '))
+ok('扣头播放对调后的 pot_off.mp3', AUDIO_PLAYED.some((s) => s.includes('pot_off.mp3')), AUDIO_PLAYED.join(','))
 
 // 铁锅扣在**头**上（不是精灵的水平正中）
 const potDraw = DRAWS.filter((d) => d.src.includes('iron_bowl.png')).slice(-1)[0]
@@ -899,7 +1068,9 @@ if (potDraw && sprDraw) {
 
 // ⑦ 双击她的头 → 把铁锅敲掉（上游是**双击**，不是单击）
 // 现在支持堆叠：一次只取最上面那口锅，所以连点几次把所有锅都取下来。
+AUDIO_PLAYED.length = 0
 const pr1 = petRect()
+DRAWS.length = 0
 if (pr1) {
   const hx = pr1.x + pr1.w * 0.68, hy = pr1.y + pr1.h * 0.06
   for (let round = 0; round < 6; round++) {
@@ -912,10 +1083,9 @@ if (pr1) {
     await advance(0.8)     // 铁锅是渐隐消失的
   }
 }
-DRAWS.length = 0
-await oneFrame()
-ok('双击她的头能敲掉铁锅', !DRAWS.some((d) => d.src.includes('iron_bowl.png')),
-  DRAWS.some((d) => d.src.includes('iron_bowl.png')) ? '铁锅还在' : '铁锅已消失')
+ok('双击她的头能敲掉头上的铁锅', !DRAWS.some((d) => d.src.includes('expression_21')),
+  [...new Set(DRAWS.map((d) => d.src.split('/').pop()))].join(','))
+ok('取锅播放对调后的 pot_land.mp3', AUDIO_PLAYED.some((s) => s.includes('pot_land.mp3')), AUDIO_PLAYED.join(','))
 
 // ⑧ 火控雷达：落地满 BowlWaitSec(10s) → 锁定；再过 LockDelaySec(1s) → 加速吸附 → 自动喂
 await eatAllBowls()
@@ -986,6 +1156,27 @@ const radarRow2 = rowBy(menuRoot, '打开火控雷达')
 if (radarRow2) click(radarRow2)   // 关掉，避免影响后续
 await flush(6)
 ok('开关火控雷达不报错', runtimeErrors.length === 0, runtimeErrors.slice(0, 2).join(' | '))
+
+console.log('')
+console.log('=== 火控雷达：自动拾取缩短到 3 秒 ===')
+await eatAllBowls()
+await advance(0.5)
+await openMenu(); click(rowBy(menuRoot, '打开火控雷达')); await flush(6)
+await openMenu()
+ok('火控雷达已勾选', rowBy(menuRoot, '打开火控雷达').textContent.includes('✓'),
+  rowBy(menuRoot, '打开火控雷达').textContent)
+AUDIO_PLAYED.length = 0
+await spawnOne()
+let radarFedAt = -1
+for (let i = 0; i < 80; i++) {
+  await advance(0.1)
+  if (AUDIO_PLAYED.some((s) => s.includes('feed.mp3'))) { radarFedAt = (i + 1) * 0.1; break }
+}
+ok('雷达开启后会自动拾取米饭盆', radarFedAt >= 0, radarFedAt < 0 ? '(8 秒内没被拾取)' : radarFedAt.toFixed(1) + ' 秒')
+ok('雷达开启后不是刚落地就吸走（≥ 2 秒）', radarFedAt >= 2, radarFedAt.toFixed(1) + ' 秒')
+ok('雷达开启后 8 秒内一定捡完（阈值 3 秒）', radarFedAt >= 0 && radarFedAt <= 8, radarFedAt.toFixed(1) + ' 秒')
+// 关掉火控雷达，避免影响后续
+await openMenu(); click(rowBy(menuRoot, '打开火控雷达')); await flush(6)
 
 console.log('')
 console.log('=== 自定义演示次数 / 测试充值金额 ===')

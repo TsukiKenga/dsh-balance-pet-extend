@@ -58,6 +58,10 @@ function stepLabel() { return moneyString(stepUnits()) }
 var DEMO_RESTORE = 0.55      // 演示结束后停留时间
 var ALPHA_MIN = 8 / 255      // 命中阈值（原版 alphaComponent > 8.0/255.0）
 var MASK_W = 384, MASK_H = 256   // 命中掩码分辨率（原图 1/4）
+// 立绘原图尺寸。平板角点（宿主下发的 tablet.tl/tr/bl）是按这个坐标系标定的，
+// 镜像时要用「原图宽度 - x」来反射，而不是用画布宽度。
+var SPRITE_W = 1536
+var SPRITE_H = 1024
 var SNAP_DURATION = 0.16     // 吸附动画（原版 easeOut 0.16s）
 var ANCHOR_MARGIN = 14       // 距屏幕边缘 14pt
 
@@ -87,8 +91,10 @@ function menuTheme() { return MENU_THEMES[state.theme === 'dark' ? 'dark' : 'lig
 // 其余角色保持单张立绘不变（这是有意的，不给他们编造表情）。
 var EXPR_CHARACTER = 'fish'
 var EXPR_HAPPY = 0     // expression_11 开口笑 —— 常态
-var EXPR_NERVOUS = 1   // expression_22 闭眼皱眉 —— 扣费动画播放中
-var EXPR_ALOOF = 2     // expression_12 鼓嘴 —— 米饭盆超时没接
+// 上游 UpdateExpression：_patActive 时 want = EXPR_NERVOUS，也就是**摸头时是这张**。
+// 表情编号沿用上游的命名（NERVOUS），别因为「摸头应该开心」就换回 11 —— 上游就是让她害羞。
+var EXPR_NERVOUS = 1   // expression_22 闭眼 / 脸红 —— 摸头、扣费动画播放中
+var EXPR_ALOOF = 2     // expression_12 鼓嘴 —— 米饭盆超时没接 / 余额归零
 var EXPR_CALM = 3      // expression_21 面无表情 —— 铁锅扣在头上
 // 下标即表情编号，顺序照抄上游（不是文件名顺序）
 var EXPR_FILES = ['expression_11.png', 'expression_22.png', 'expression_12.png', 'expression_21.png']
@@ -104,6 +110,16 @@ var bowlWait = 0
 var exprBowlAlive = false    // 场上有未接的米饭盆
 var exprBowlLocked = false   // 盆已被锁定（正在被吸走）
 var exprPotOnHead = false    // 铁锅扣在头上
+
+// —— 「回弹」形变（上游 HeadSquash）——
+// 铁锅扣到头上、以及被双击取下时，整张立绘沿竖直方向压缩一下再弹回。
+// 参数与上游逐条对齐：时长 0.5 s、振幅 0.16、cos(2.2πu) 的过冲会先压后拉。
+// 锚点是**脚底**（spriteRect 下沿），所以看起来像被从上面按了一下。
+var HEAD_SQUASH_DUR = 0.5
+var HEAD_SQUASH_AMP = 0.16
+var HEAD_SQUASH_WOBBLE = 2.2
+// 计时器从「时长」开始 = 没有动画；触发时置 0。
+var headSquashT = HEAD_SQUASH_DUR
 
 // ============================================================================
 // 摸头手势（来自上游 VK-1 v3「petpet」）
@@ -124,7 +140,15 @@ var PAT_PALM_X = [0.319, 0.356, 0.318, 0.425, 0.298]
 var PAT_PALM_Y = [0.511, 0.720, 0.835, 0.744, 0.608]
 var PAT_PALM_BIAS_X = 0.393
 var PAT_PALM_BIAS_Y = -0.206
-var PAT_REF_SCALE = 446 / 107
+// —— petpet 的「弹性」形变（上游 PatGeometry 逐行照抄）——
+// 出处是 https://benisland.neocities.org/petpet/ （aDu/pet-pet-gif）的原始公式：
+//   width  = 0.80 + j * 0.02      height = 0.80 - j * 0.05      offsetY = 0.12 + j * 0.05
+// 上游把它实现成按**帧号**取值的表（j 已展开），这里保持同一份数：
+// 第 0 帧原样，越往后越扁越宽、同时向下沉，第 5 帧弹回原样 —— 视觉上就是「弹性」。
+var PETPET_W = [0.80, 0.82, 0.84, 0.86, 0.88]
+var PETPET_H = [0.80, 0.75, 0.70, 0.65, 0.60]
+var PETPET_OFFSET_Y = [0.12, 0.17, 0.22, 0.27, 0.32]
+
 var patImages = []
 var patReady = false
 var patActive = false
@@ -188,6 +212,11 @@ var CUE_LABELS = {
   turn: '回合结束喜报',
   settle: '结算证书',
 }
+// 单击平板后的峰谷视图显示时长（秒）。默认 2.5 秒，右键菜单可改（含自定义）。
+var DEFAULT_TARIFF_SECONDS = 2.5
+var TARIFF_SECONDS_PRESETS = [1, 2, 2.5, 3, 5, 10]
+var TARIFF_SECONDS_MIN = 0.5
+var TARIFF_SECONDS_MAX = 60
 
 // —— 持久化状态 ——
 var state = {
@@ -196,6 +225,8 @@ var state = {
   sizePx: 0,           // >0 表示用了「自定义尺寸」，此时忽略 sizeIndex
   soundOn: true,
   volume: 80,          // 旧版总音量：同时作为所有音效的初始值
+  // 声音菜单的第一层选择：true = 分音效调节（显示每个音效），false = 只显示全部音效音量
+  soundPerCue: true,
   // 每个音效自己的音量 0..100；缺省 = volume
   cueVolume: { hit: 80, feed: 80, land: 80, off: 80, turn: 80, settle: 80 },
   // 每个音效的自定义文件元信息（真正的 Blob 在 IndexedDB 里）
@@ -207,6 +238,8 @@ var state = {
   hidden: false,
   source: 'deepseek',   // 平板显示哪个 API 的余额（右键菜单可切）
   stepYuan: DEFAULT_STEP, // 每扣多少钱提示一次（最小 0.01 元）
+  // 单击平板后峰谷视图显示多久（秒），默认 2.5
+  tariffSeconds: DEFAULT_TARIFF_SECONDS,
   fxBowlDrop: true,     // 充值后掉米饭盆，手动拖取
   fxPat: true,          // 鼠标抚摸会开心
   fxHurt: true,         // 扣费时播放音效与动画
@@ -223,6 +256,7 @@ function loadState() {
     if (typeof o.sizeIndex === 'number' && o.sizeIndex >= 0 && o.sizeIndex < SIZE_PRESETS.length) state.sizeIndex = o.sizeIndex
     if (typeof o.sizePx === 'number' && isFinite(o.sizePx) && o.sizePx >= 0) state.sizePx = Math.round(o.sizePx)
     if (typeof o.soundOn === 'boolean') state.soundOn = o.soundOn
+    if (typeof o.soundPerCue === 'boolean') state.soundPerCue = o.soundPerCue
     if (typeof o.volume === 'number' && isFinite(o.volume)) {
       state.volume = Math.max(0, Math.min(100, Math.round(o.volume)))
       // 旧状态没有 cueVolume：用总音量补齐
@@ -254,6 +288,7 @@ function loadState() {
     if (typeof o.pollSeconds === 'number') state.pollSeconds = clampPoll(o.pollSeconds)
     if (typeof o.source === 'string' && o.source) state.source = o.source
     if (typeof o.stepYuan === 'number' && isFinite(o.stepYuan)) state.stepYuan = clampStep(o.stepYuan)
+    if (typeof o.tariffSeconds === 'number' && isFinite(o.tariffSeconds)) state.tariffSeconds = clampTariffSeconds(o.tariffSeconds)
     if (typeof o.fxBowlDrop === 'boolean') state.fxBowlDrop = o.fxBowlDrop
     if (typeof o.fxPat === 'boolean') state.fxPat = o.fxPat
     if (typeof o.fxHurt === 'boolean') state.fxHurt = o.fxHurt
@@ -269,6 +304,15 @@ function clampPoll(s) {
   s = Number(s)
   if (!isFinite(s)) return 30
   return Math.min(300, Math.max(10, s))
+}
+// 平板峰谷视图时长：0.5 ~ 60 秒，保留一位小数
+function clampTariffSeconds(s) {
+  s = Number(s)
+  if (!isFinite(s)) return DEFAULT_TARIFF_SECONDS
+  s = Math.round(s * 10) / 10
+  if (s < TARIFF_SECONDS_MIN) s = TARIFF_SECONDS_MIN
+  if (s > TARIFF_SECONDS_MAX) s = TARIFF_SECONDS_MAX
+  return s
 }
 
 // —— 运行时 ——
@@ -326,7 +370,7 @@ var sourceKind = 'balance'
 var quotaRemain = null         // 0..100（宿主已统一换算成「剩余 %」）
 var quotaLabel = ''
 // —— 平板峰谷彩蛋（只对 DSH 账户余额 / DeepSeek 生效）——
-var tariffT = 0                // >0：平板显示峰谷彩蛋的剩余秒数（点击后 1 秒）
+var tariffT = 0                // >0：平板显示峰谷彩蛋的剩余秒数（点击后 state.tariffSeconds 秒）
 var tariff = null              // { peak, label, nextLabel, nextAt, beijing }
 var tariffLoading = false
 // —— 节假日清单状态（宿主下发，用于过期/跨年提示）——
@@ -352,6 +396,47 @@ function layout() {
 
 // 原版：屏幕上大于等于 side 的那条带才接受点击（画布坐标里就是 y >= H - side）
 function inBodyBand(yCanvas) { return yCanvas >= H - side }
+
+// ============================================================================
+// 整只角色的镜像 / 弹性形变
+// ============================================================================
+// 上游 _snapRight：站在屏幕右半边时，立绘、平板几何、摸头的手全部镜像。
+// 文字（平板读数、飘字）不镜像 —— 镜像过去的字是反的，没法读。
+function isMirrored() { return state.snapCorner === 'right' }
+
+// 铁锅扣头 / 取下时的竖直压缩量（>0 压扁，<0 拉长）。上游公式：
+//   cos(u * 2.2π) * (1 - u) * 0.16
+function headSquashAmount() {
+  if (headSquashT >= HEAD_SQUASH_DUR) return 0
+  var u = headSquashT / HEAD_SQUASH_DUR
+  return Math.cos(u * Math.PI * HEAD_SQUASH_WOBBLE) * (1 - u) * HEAD_SQUASH_AMP
+}
+
+// 摸头当前帧的形变（相对第 0 帧归一化：只有「变化量」有意义，0.8 的基准不能直接乘）
+function patSquashAmount() {
+  var i = patFrameIndex()
+  if (!(i >= 0 && i < PETPET_W.length)) i = 0
+  return {
+    x: PETPET_W[i] / PETPET_W[0],
+    y: PETPET_H[i] / PETPET_H[0],
+    shift: (PETPET_OFFSET_Y[i] - PETPET_OFFSET_Y[0]) * spriteRect.h,
+  }
+}
+
+// 这一帧要用哪个形变：摸头（弹性）压过铁锅回弹（上游同优先级）。
+// 返回 null = 不做形变。x/y 是缩放，shift 是「往下沉」的像素量（只折进竖直锚点）。
+function currentSquash() {
+  // 手部素材没加载成功时不形变 —— 否则会看到她被一只看不见的手按下去（上游同样要求 _patReady）
+  if (patActive && patReady) return patSquashAmount()
+  var h = headSquashAmount()
+  if (Math.abs(h) > 0.002) return { x: 1, y: 1 - h, shift: 0 }
+  return null
+}
+
+// 形变的两个锚点：竖直在脚底，水平在她自己的中线（上游同）。
+function squashAnchorX() { return spriteRect.x + spriteRect.w / 2 }
+function squashAnchorY(sq) { return spriteRect.y + spriteRect.h + ((sq && sq.shift) || 0) }
+
 
 // ============================================================================
 // 素材
@@ -445,7 +530,7 @@ function setExpression(i) {
 }
 
 // 表情状态机。优先级与上游逐条对齐：
-//   铁锅在头上（且场上无盆）  >  正在扣费（含结束后 1 秒保持）  >  盆超时未接  >  常态
+//   摸头（压过一切）  >  余额归零  >  铁锅在头上（且场上无盆）  >  正在扣费（含结束后 1 秒保持）  >  盆超时未接  >  常态
 function updateExpression(dt) {
   if (!hasExpressions) return
   var ch = activeChar()
@@ -462,8 +547,10 @@ function updateExpression(dt) {
 
   var want
   if (patActive) {
-    // 摸头时她一定是开心的：这是玩家主动互动，优先级高于扣费紧张与盆超时。
-    want = EXPR_HAPPY
+    // 上游 UpdateExpression 的原文就是 `if (_patActive) want = EXPR_NERVOUS;`
+    // —— 摸头时她切到 expression_22（闭眼 / 脸红），不是常态笑脸。
+    // 优先级仍然最高：玩家正在跟她互动，这张脸是对玩家的回应。
+    want = EXPR_NERVOUS
   } else if (zeroBalance) {
     // 余额归零：上游 v3 的规则是「always ALOOF」，压过铁锅的冷脸。
     want = EXPR_ALOOF
@@ -519,6 +606,11 @@ var IRON_SEAT_MIN_FALL = 30    // px/s
 // —— 火控雷达的锁定与吸附（上游常量，按 side 折算成这里的尺度）——
 // 上游是 340 px 的中杯：SuckAccel 960、SuckMaxSpeed 2400 → 每单位 side 为 2.82 / 7.06
 var LOCK_DELAY_SEC = 1.0       // 上游 LockDelaySec：锁定后多久开始吸附
+// 打开火控雷达时，自动拾取时长缩短到 3 秒（从盆落稳算起）：
+// 锁定阈值直接按 3 秒算，并且不再额外等 LockDelaySec，3 秒到就开始吸。
+var RADAR_BOWL_WAIT_SEC = 3.0
+function bowlWaitSec() { return radarOn ? RADAR_BOWL_WAIT_SEC : BOWL_WAIT_SEC }
+function lockDelaySec() { return radarOn ? 0 : LOCK_DELAY_SEC }
 function suckAccel() { return side * 2.82 }
 function suckMaxSpeed() { return side * 7.06 }
 // 名牌方括号边长 S = 1.33 × 盆的绘制直径（上游 ComputeBlip: S = 1.33 * bowlDia）
@@ -528,7 +620,7 @@ var riceImg = null
 var ironImg = null
 var bowls = []           // 场上所有盆（米饭盆 + 多个可堆叠的铁锅）
 var hearts = []          // 投喂时飘起的像素爱心
-var radarOn = false      // 「打开火控雷达」：提前把名牌亮出来给你看
+var radarOn = false      // 「打开火控雷达」：提前亮出名牌，并把自动拾取缩短到 3 秒
 var potPendT = 0         // 投喂后延迟一小会儿再把锅丢下来
 var potPendN = 0         // 排队等待掉落的锅（一次投喂一个）
 var riceSpawnSeq = 0     // 落点分槽：连续几笔充值不会全挤在一处
@@ -583,10 +675,20 @@ function computeHeadAnchor() {
 function headPoint() {
   var bx = (typeof state.x === 'number') ? state.x : ANCHOR_MARGIN
   var by = (typeof state.y === 'number') ? state.y : 0
-  return {
-    x: bx + spriteRect.x + spriteRect.w * headAnchor.x,
-    y: by + spriteRect.y + spriteRect.h * headAnchor.y,
+  // 头顶锚点是在**未镜像**的立绘上量出来的；镜像后她的头到了另一边。
+  var hx = headAnchor.x
+  if (isMirrored()) hx = 1 - hx
+  var lx = spriteRect.x + spriteRect.w * hx
+  var ly = spriteRect.y + spriteRect.h * headAnchor.y
+  // 形变中的她整体在动，头顶（挂锅 / 冒爱心的参照点）必须跟着走 ——
+  // 上游 DrawRiceArt 同样只让「已经成为她一部分」的锅跟随形变。
+  var sq = currentSquash()
+  if (sq) {
+    var ax = squashAnchorX(), ay = squashAnchorY(sq)
+    lx = ax + (lx - ax) * sq.x
+    ly = ay + (ly - ay) * sq.y
   }
+  return { x: bx + lx, y: by + ly }
 }
 
 function loadTopupArt() {
@@ -656,9 +758,9 @@ function newBowl(props) {
   var b = {
     x: 0, y: 0, vx: 0, vy: 0, r: 10,
     bounces: 0, fed: false, fedT: 0,
-    iron: false, onHead: false, homing: false,
+    iron: false, onHead: false, homing: false, autoEmpty: false,
     born: 0, restT: 0, grounded: false, amount: 0,
-    locked: false, lockT: 0, sucking: false,
+    locked: false, lockT: 0, sucking: false, suckSpeed: 0,
     dragging: false, grabX: 0, grabY: 0,
   }
   for (var k in props) { if (Object.prototype.hasOwnProperty.call(props, k)) b[k] = props[k] }
@@ -697,19 +799,39 @@ function spawnIronPot() {
   if (n >= 5) return
   var rp = Math.max(12, side * 0.19)
   var hp = headPoint()
+  var dir = Math.random() < 0.5 ? -1 : 1
   bowls.push(newBowl({
-    // 从她头顶正上方落下来，这样才能扣到头上（并且叠在已有锅的上面）
+    // 吃完后的空锅从桌宠身上**抛到随机位置**，先落在地上；
+    // 想扣头要再把它拖回来（见 updateBowls 的拖动判定）。
     x: hp.x,
-    y: -rp,
+    y: hp.y - rp * 0.6,
     r: rp,
     iron: true,
-    // 自动掉落的空锅会跟着她的头横向修正，避免她走动后锅落在地上
-    homing: true,
+    autoEmpty: true,
+    vx: dir * side * (0.55 + Math.random() * 0.7),
+    vy: -side * (0.55 + Math.random() * 0.5),
   }))
   wake()
 }
 
-// 把头上的锅拿下来（上游是**双击**头部，调用方负责判双击）。
+// 把一口铁锅扣到头上（拖上去 / 落下都能走这里）
+function seatIronOnHead(r, hp, slot) {
+  if (!r || r.fed) return
+  r.onHead = true
+  r.homing = false
+  r.autoEmpty = false
+  r.headSlot = slot
+  r.dragging = false
+  r.x = hp.x
+  r.y = hp.y - slot * ironStackStep(r.r)
+  r.vx = 0
+  r.vy = 0
+  if (heldBowl === r) heldBowl = null
+  // 锅落头：她缩一下再弹回来（上游 AttachIronPot 里的 _headSquashT = 0）
+  headSquashT = 0
+  playCue('land')
+  wake()
+}
 // 堆叠时只取**最上面**那一个；下面的锅会在下一帧自动补位（落点每帧重算）。
 // 上游的行为是「铁盆**渐隐消失**」，不是把它弹飞 —— 所以复用「投喂后淡出」那条通道。
 function knockPotOff() {
@@ -726,6 +848,8 @@ function knockPotOff() {
   top.vx = 0; top.vy = 0
   if (heldBowl === top) heldBowl = null
   exprPotOnHead = false
+  // 取下也要回弹一次（上游 KnockPotOff 同）
+  headSquashT = 0
   playCue('off')
   wake()
 }
@@ -746,6 +870,8 @@ function bowlOnPet(b) {
     var sy = b.y + (i === 0 ? 0 : Math.sin(a) * b.r * 0.8)
     var nx = Math.round((sx - bx - spriteRect.x) / spriteRect.w * m.w)
     var ny = Math.round((sy - by - spriteRect.y) / spriteRect.h * m.h)
+    // 镜像后取样要翻到原图的另一侧，否则「碰到头发」会判在她的反方向。
+    if (isMirrored()) nx = m.w - 1 - nx
     if (nx < 0 || ny < 0 || nx >= m.w || ny >= m.h) continue
     if (m.data[(ny * m.w + nx) * 4 + 3] > 8) return true
   }
@@ -817,6 +943,8 @@ function updateBowls(dt) {
   worn.sort(function (a, b) { return (a.headSlot || 0) - (b.headSlot || 0) })
   for (var ws = 0; ws < worn.length; ws++) {
     var wp = worn[ws]
+    // 头上的锅跟随当前尺寸档（改大小后不用重新喂一遍）
+    wp.r = Math.max(12, side * 0.19)
     wp.headSlot = ws
     wp.x = hp.x
     wp.y = hp.y - ws * ironStackStep(wp.r)
@@ -826,16 +954,18 @@ function updateBowls(dt) {
   // —— 锁定判定 ——
   // 「只要有一个米饭盆落地满 BowlWaitSec 没被领取，**所有**盆一起锁定」。
   // 上游的例子：第 1 个盆满 10 秒时，刚掉下来 2 秒的那个也一起被锁。
+  // 打开火控雷达时阈值缩短到 3 秒（bowlWaitSec），便于快速验证名牌与吸附。
   var trigger = false
+  var waitSec = bowlWaitSec()
   for (var i = 0; i < bowls.length; i++) {
     var q = bowls[i]
     if (q.iron || q.fed || q.dragging || q.locked) continue
-    if (q.restT >= BOWL_WAIT_SEC) trigger = true
+    if (q.restT >= waitSec) trigger = true
   }
   if (trigger) {
     for (var i = 0; i < bowls.length; i++) {
       var q = bowls[i]
-      if (!q.iron && !q.fed) { q.locked = true; q.lockT = 0 }
+      if (!q.iron && !q.fed) { q.locked = true; q.lockT = 0; q.suckSpeed = 0 }
     }
     exprBowlLocked = true
     wake()
@@ -857,6 +987,16 @@ function updateBowls(dt) {
     if (r.dragging) {
       r.restT = 0
       if (!r.iron && bowlOnPet(r)) { feedBowl(r); continue }
+      // 空锅第二次被拖回她身上时，直接扣到头上（不必松手让它再落一次）
+      if (r.iron) {
+        var dragSeatY = hp.y - worn.length * ironStackStep(r.r)
+        var nearHead = Math.abs(r.x - hp.x) <= spriteRect.w * 0.32 &&
+          r.y >= dragSeatY - r.r * 1.6 && r.y <= dragSeatY + r.r * 1.4
+        if (nearHead || bowlOnPet(r)) {
+          seatIronOnHead(r, hp, worn.length)
+          continue
+        }
+      }
       continue
     }
 
@@ -872,39 +1012,41 @@ function updateBowls(dt) {
 
     // —— 铁锅落到头顶高度、且横向也在头附近 → 扣上 ——
     // 只有**下落**（vy >= IRON_SEAT_MIN_FALL）才算，松手「放」在她头上不算；
+    // 刚吃完掉下来的空锅 autoEmpty 不会自动扣头，必须先被拖一次。
     // 有堆叠时目标高度是最上面那口锅的锅沿。
-    if (r.iron && r.vy >= IRON_SEAT_MIN_FALL) {
+    if (r.iron && !r.autoEmpty && r.vy >= IRON_SEAT_MIN_FALL) {
       var seatY = hp.y - worn.length * ironStackStep(r.r)
       if ((r.y + r.r * 0.35) >= seatY && r.y <= seatY + r.r * 1.5 &&
           Math.abs(r.x - hp.x) <= spriteRect.w * 0.30) {
-        r.onHead = true
-        r.homing = false
-        r.headSlot = worn.length
-        r.x = hp.x
-        r.y = seatY
-        r.vx = 0; r.vy = 0
-        playCue('land')
-        wake()
+        seatIronOnHead(r, hp, worn.length)
         continue
       }
     }
 
     // —— 吸附：锁定满 LockDelaySec 后开始，按 SuckAccel 加速朝她飞 ——
+    // 打开火控雷达时不等这 1 秒（lockDelaySec 返回 0），落地满 3 秒就开始吸。
     if (r.locked) {
       r.lockT += dt
-      if (r.lockT >= LOCK_DELAY_SEC) r.sucking = true
+      if (r.lockT >= lockDelaySec()) r.sucking = true
     }
     if (r.sucking) {
       var dx = hp.x - r.x, dy = hp.y - r.y
       var d = Math.sqrt(dx * dx + dy * dy) || 1e-6
       if (d < r.r + side * 0.05) { feedBowl(r); continue }
-      r.vx += (dx / d) * suckAccel() * dt
-      r.vy += (dy / d) * suckAccel() * dt
-      var sp = Math.sqrt(r.vx * r.vx + r.vy * r.vy)
-      var cap = suckMaxSpeed()
-      if (sp > cap) { r.vx = r.vx / sp * cap; r.vy = r.vy / sp * cap }
-      r.x += r.vx * dt
-      r.y += r.vy * dt
+      // 直接沿「朝她」的方向推进（上游 Radarsuck：Speed 加速、step = Speed·dt）。
+      // 之前是把加速度累加到 vx/vy 上再走物理：速度会冲过头、绕着她打转，
+      // 距离一直收敛不到喂食阈值 —— 雷达开启后 3 秒吸附会永远吃不到。
+      // 雷达开启时直接用最高速：3 秒一到就落到她身上，不去等加速段。
+      r.suckSpeed = radarOn
+        ? suckMaxSpeed()
+        : Math.min(suckMaxSpeed(), (r.suckSpeed || 0) + suckAccel() * dt)
+      var step = r.suckSpeed * dt
+      if (step >= d) { feedBowl(r); continue }
+      r.x += (dx / d) * step
+      r.y += (dy / d) * step
+      r.vx = (dx / d) * r.suckSpeed
+      r.vy = (dy / d) * r.suckSpeed
+      r.grounded = false
       continue
     }
 
@@ -923,10 +1065,13 @@ function updateBowls(dt) {
 
     // 地面 = 窗口底边：弹几下之后转为滑动，最后停住
     var floor = riceGroundY()
+    var wasGrounded = r.grounded
     r.grounded = false
     if (r.y + r.r > floor) {
       r.y = floor - r.r
       r.grounded = true
+      // 铁锅第一次落到窗口底部：播放「扣头」音效（对调后的 pot_off）
+      if (r.iron && !wasGrounded && Math.abs(r.vy) > 90) playCue('land')
       if (Math.abs(r.vy) > 90 && r.bounces < RICE_MAX_BOUNCES) {
         r.vy = -Math.abs(r.vy) * RICE_RESTITUTION
         r.bounces += 1
@@ -1172,7 +1317,10 @@ function hitTest(cx, cy) {  if (!inBodyBand(cy)) return false
   if (!m) return true // 取不到掩码就整块可点（退化但可用）
   var nx = (cx - spriteRect.x) / spriteRect.w
   var ny = (cy - spriteRect.y) / spriteRect.h
+  // 立绘镜像时，画面上左半边其实来自原图右半边 —— 掩码要按镜像后的坐标取样。
+  if (isMirrored()) nx = 1 - nx
   var px = Math.min(m.w - 1, Math.max(0, Math.floor(nx * m.w)))
+
   var py = Math.min(m.h - 1, Math.max(0, Math.floor(ny * m.h)))
   return m.data[(py * m.w + px) * 4 + 3] / 255 > ALPHA_MIN
 }
@@ -1244,10 +1392,18 @@ function draw() {
   var sx = spriteRect.x + shakeX
   var sy = spriteRect.y + shakeY
 
+  // 这一帧的形变（摸头弹性 / 铁锅回弹）与「是否镜像到右半边」。
+  // 形变锚点：竖直在脚底（摸头时再往下沉一点），水平在她的中线。
+  var sq = currentSquash()
+  var mir = isMirrored()
+  var ax = squashAnchorX()
+  var ay = squashAnchorY(sq)
+
   if (img) {
     // 按**原图宽高比**等比缩放，而不是硬铺满 spriteRect。
-    // 原因：spriteRect 是按立绘 1536x1024（1.5:1）算出来的，而表情立绘是 1024x1024 正方形 ——
-    // 铺满会把角色横向拉长 1.5 倍（这就是「大肥鱼被拉长」的原因）。
+    // 原因：spriteRect 是按立绘 1536x1024（1.5:1）算出来的，而早期版本的表情立绘是
+    // 1024x1024 正方形 —— 铺满会把角色横向拉长 1.5 倍（这就是「大肥鱼被拉长」的原因）。
+    // 现在表情图也是 1536x1024，但这段仍然按原图比例算：以后换成别的比例也不会拉伸。
     // 这里以**高度**为基准对齐：角色在两种图里高度一致，换表情不会跳大小。
     // 对 1536x1024 的立绘本身，这个式子算出来正好等于 spriteRect，是恒等变换。
     var dw = spriteRect.w, dh = spriteRect.h, dx = sx, dy = sy
@@ -1258,6 +1414,19 @@ function draw() {
       dx = sx + (spriteRect.w - dw) / 2
       dy = sy + (spriteRect.h - dh) / 2
     }
+    ctx.save()
+    if (sq) {
+      ctx.translate(ax, ay)
+      ctx.scale(sq.x, sq.y)
+      ctx.translate(-ax, -ay)
+    }
+    if (mir) {
+      // 绕立绘自身的中线翻转。平板的四边形、命中掩码、头顶锚点各自走同一套镜像，
+      // 所以「她转过身」之后手里的平板仍然在她手上。
+      ctx.translate(dx + dw / 2, 0)
+      ctx.scale(-1, 1)
+      ctx.translate(-(dx + dw / 2), 0)
+    }
     ctx.drawImage(img, dx, dy, dw, dh)
     // 红闪：source-atop 只覆盖不透明像素，保住精灵轮廓（原版 blendMode = .sourceAtop）
     var impact = Math.max(flashImpact(), celebrateImpact())
@@ -1267,6 +1436,7 @@ function draw() {
       ctx.fillRect(dx, dy, dw, dh)
       ctx.globalCompositeOperation = 'source-over'
     }
+    ctx.restore()
   } else {
     // 缺图兜底（原版行为）：圆角块 + 提示，保证右键菜单还够得着
     ctx.fillStyle = 'rgba(246,248,253,0.9)'
@@ -1281,7 +1451,7 @@ function draw() {
 
   // 抱盆状态下完全不画平板（原版：标题/余额/状态点/飘字都没有）
   var offlineArt = !!(ch && ch.offlineSprite && ch.id === 'fish' && !connected)
-  if (img && ch && !offlineArt) drawTablet(ch, shakeX, shakeY, dpr)
+  if (img && ch && !offlineArt) drawTablet(ch, shakeX, shakeY, dpr, sq)
 
   // 光环与飘字用不带震动的基准变换
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -1307,22 +1477,54 @@ function celebrateImpact() {
   return Math.max(0, 1 - (elapsed - 0.10) / (CELEBRATE_DURATION - 0.10))
 }
 
+// 平板四角在**画布坐标**里的位置。镜像时 x 按原图宽度翻（上游 _sprNormalSourceW - x），
+// 并且顶点顺序会反转 —— 所以这里返回的是「面板的左上 / 右上 / 左下 / 右下」（A/B/C/D），
+// 不是原图里 TL/TR/BL 的固定角色。镜像后继续用 TL 当左上角，整个面板会歪到腿上去。
+function tabletQuad(ch) {
+  var s = spriteRect.w / SPRITE_W
+  var mir = isMirrored()
+  function m(p) { return [mir ? SPRITE_W - p[0] : p[0], p[1]] }
+  var TL = m(ch.tablet.tl), TR = m(ch.tablet.tr), BL = m(ch.tablet.bl)
+  // 第四个角由平行四边形补出来（角色表只存三个角）
+  var BR = [TR[0] + BL[0] - TL[0], TR[1] + BL[1] - TL[1]]
+  var A, B, C, D
+  if (mir) {
+    // 镜像后的环是 TR', TL', BR', BL'：面板的左上角是 TR'，左下角是 BR'
+    A = TR; B = TL; C = BR; D = BL
+  } else {
+    A = TL; B = TR; C = BL; D = BR
+  }
+  return {
+    A: { x: spriteRect.x + A[0] * s, y: spriteRect.y + A[1] * s },
+    B: { x: spriteRect.x + B[0] * s, y: spriteRect.y + B[1] * s },
+    C: { x: spriteRect.x + C[0] * s, y: spriteRect.y + C[1] * s },
+    D: { x: spriteRect.x + D[0] * s, y: spriteRect.y + D[1] * s },
+  }
+}
+
 // 平板仿射：把 400×220 的面板坐标直接映射到设备像素。
 // 推导用原图左上角为原点、y 向下；已用原版文档记录的右下角 (1443,834)/(1430,836) 验证过。
-// 注意要把 dpr、震动偏移一起揉进矩阵，否则 setTransform 会把它们抹掉。
-function drawTablet(ch, shakeX, shakeY, dpr) {
+// 注意要把 dpr、震动偏移、形变一起揉进矩阵，否则 setTransform 会把它们抹掉。
+function drawTablet(ch, shakeX, shakeY, dpr, sq) {
   var panel = manifest.panel || { w: 400, h: 220 }
   var c = ctx
   var pw = panel.w, ph = panel.h
-  var s = spriteRect.w / 1536
-  var TL = ch.tablet.tl, TR = ch.tablet.tr, BL = ch.tablet.bl
-  var a = (TR[0] - TL[0]) / pw * s
-  var b = (TR[1] - TL[1]) / pw * s
-  var cc = (BL[0] - TL[0]) / ph * s
-  var d = (BL[1] - TL[1]) / ph * s
-  var e = spriteRect.x + shakeX + TL[0] * s
-  var f = spriteRect.y + shakeY + TL[1] * s
-  c.setTransform(dpr * a, dpr * b, dpr * cc, dpr * d, dpr * e, dpr * f)
+  var q = tabletQuad(ch)
+  var A = q.A, B = q.B, C = q.C
+  var a = (B.x - A.x) / pw
+  var b = (B.y - A.y) / pw
+  var cc = (C.x - A.x) / ph
+  var d = (C.y - A.y) / ph
+  var e = A.x + shakeX
+  var f = A.y + shakeY
+  c.setTransform(dpr, 0, 0, dpr, 0, 0)
+  // 平板只跟随**竖直**形变（上游 SquashY）：横向张开会把整个面板拉宽，字会跟着变形。
+  // 形变必须放在 setTransform 之后作为 transform 叠上去，否则会被矩阵抹掉。
+  if (sq) {
+    var ay = squashAnchorY(sq)
+    c.transform(1, 0, 0, sq.y, 0, ay * (1 - sq.y))
+  }
+  c.transform(a, b, cc, d, e, f)
 
   // 金额类显示钱；订阅额度类没有金额，显示「剩余 %」（宿主已把各家的
   // 「已用 %」「剩余 %」两种语义统一成剩余百分比）
@@ -1334,40 +1536,48 @@ function drawTablet(ch, shakeX, shakeY, dpr) {
     : moneyString(displayedUnits())
 
   if (showTariff) {
-    // 点击平板后只显示 1 秒：背景峰价红 / 谷价绿，金额区完全换成「梁文峰 / 梁文谷」。
-    // 1 秒结束自动回到余额，不需要再点一次。
+    // 点击平板后显示 state.tariffSeconds 秒（默认 2.5）：背景峰价红 / 谷价绿。
+    // 布局按需求改成**两行**：第一行 梁文峰 / 梁文谷，第二行 距峰时 / 距谷时 + 剩余时长。
+    // 没有「峰谷时段」标题行了 —— 面板只放这两行。
     if (tariff && tariffRemainSec() <= 0) ensureTariff(true)
     var peakNow = !!(tariff && tariff.peak)
     var bg = tariff ? (peakNow ? '#c62828' : '#2e7d32') : '#455a64'
     c.fillStyle = bg
     c.fillRect(0, 0, pw, ph)
 
-    var titleSize2 = ph * PANEL_TITLE_RATIO
-    c.textAlign = 'center'
-    c.textBaseline = 'middle'
-    c.fillStyle = 'rgba(255,255,255,0.86)'
-    c.font = 'bold ' + titleSize2 + 'px system-ui, "Segoe UI", sans-serif'
-    c.fillText('峰谷时段', pw / 2, ph - ph * PANEL_TITLE_Y_RATIO)
-
     var tName = tariff ? tariff.label : '峰谷时段'
     var tNext = tariff ? (tariff.nextLabel + ' ' + fmtDuration(tariffRemainSec())) : '正在读取…'
-    var nameSize = ph * PANEL_AMOUNT_RATIO
-    var subSize = ph * 0.16
-    var rowY2 = ph - ph * PANEL_ROW_RATIO
+    var nameSize = ph * 0.34
+    var subSize = ph * 0.185
+    // 两行的中线：上 0.38、下 0.72（面板坐标 y 向下）
+    var nameY = ph * 0.38
+    var nextY = ph * 0.72
+    var maxTextW = pw * PANEL_MAX_TEXT_RATIO
+
+    c.textAlign = 'center'
+    c.textBaseline = 'middle'
+
+    // 第一行：梁文峰（峰价）/ 梁文谷（谷价）
     c.fillStyle = '#ffffff'
     c.font = 'bold ' + nameSize + 'px system-ui, "Segoe UI", sans-serif'
     var nameW = c.measureText(tName).width
-    var nameScale = nameW > pw * PANEL_MAX_TEXT_RATIO ? pw * PANEL_MAX_TEXT_RATIO / nameW : 1
+    var nameScale = nameW > maxTextW ? maxTextW / nameW : 1
     c.save()
-    c.translate(pw / 2, rowY2)
+    c.translate(pw / 2, nameY)
     c.scale(nameScale, nameScale)
-    c.textAlign = 'center'
     c.fillText(tName, 0, 0)
     c.restore()
-    c.fillStyle = 'rgba(255,255,255,0.88)'
+
+    // 第二行：距峰时 / 距谷时 + 倒计时
+    c.fillStyle = 'rgba(255,255,255,0.90)'
     c.font = 'bold ' + subSize + 'px ui-monospace, "SF Mono", Consolas, monospace'
-    c.textAlign = 'center'
-    c.fillText(tNext, pw / 2, rowY2 + ph * 0.18)
+    var nextW = c.measureText(tNext).width
+    var nextScale = nextW > maxTextW ? maxTextW / nextW : 1
+    c.save()
+    c.translate(pw / 2, nextY)
+    c.scale(nextScale, nextScale)
+    c.fillText(tNext, 0, 0)
+    c.restore()
 
     c.beginPath()
     c.arc(pw * DOT_X_RATIO, ph - ph * DOT_Y_RATIO, DOT_SIZE / 2, 0, Math.PI * 2)
@@ -1427,17 +1637,12 @@ function drawTablet(ch, shakeX, shakeY, dpr) {
 }
 
 // 画布局部坐标是否落在平板四边形里（点击平板切换峰谷彩蛋用）。
-// 与 drawTablet 用同一套角点 / 缩放，避免「看得到却点不到」。
+// 与 drawTablet 共用 tabletQuad：镜像 / 换角色 / 改尺寸后都不会「看得到却点不到」。
 function pointInTablet(cx, cy) {
   var ch = activeChar()
   if (!ch || !ch.tablet) return false
-  var s = spriteRect.w / 1536
-  var TL = ch.tablet.tl, TR = ch.tablet.tr, BL = ch.tablet.bl
-  var x0 = spriteRect.x + TL[0] * s, y0 = spriteRect.y + TL[1] * s
-  var x1 = spriteRect.x + TR[0] * s, y1 = spriteRect.y + TR[1] * s
-  var x3 = spriteRect.x + BL[0] * s, y3 = spriteRect.y + BL[1] * s
-  var x2 = x1 + x3 - x0, y2 = y1 + y3 - y0
-  var pts = [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
+  var q = tabletQuad(ch)
+  var pts = [[q.A.x, q.A.y], [q.B.x, q.B.y], [q.D.x, q.D.y], [q.C.x, q.C.y]]
   var inside = false
   for (var i = 0, j = 3; i < 4; j = i++) {
     var xi = pts[i][0], yi = pts[i][1]
@@ -1525,8 +1730,9 @@ function appendLabel(text, color) {
 var CUE_FILES = {
   hit: PREFIX + '/hit.mp3',
   feed: PREFIX + '/sound/feed.mp3',
-  land: PREFIX + '/sound/pot_land.mp3',
-  off: PREFIX + '/sound/pot_off.mp3',
+  // 按用户要求：扣头 / 取下两个音效对调
+  land: PREFIX + '/sound/pot_off.mp3',
+  off: PREFIX + '/sound/pot_land.mp3',
   turn: PREFIX + '/sound/turn.mp3',
   settle: PREFIX + '/sound/settle.mp3',
 }
@@ -2055,6 +2261,11 @@ function tick(dt) {
   if (topupTime > 0) topupTime = Math.max(0, topupTime - dt)
   if (nervousT > 0) nervousT = Math.max(0, nervousT - dt)
   if (tariffT > 0) tariffT = Math.max(0, tariffT - dt)
+  // 铁锅回弹的计时：到 HEAD_SQUASH_DUR 就停住（停住 = 不再形变）
+  if (headSquashT < HEAD_SQUASH_DUR) {
+    headSquashT += dt
+    if (headSquashT > HEAD_SQUASH_DUR) headSquashT = HEAD_SQUASH_DUR
+  }
   updateBowls(dt)
   updateHearts(dt)
   updatePat(dt)
@@ -2116,6 +2327,7 @@ function needsAnimation() {
     // 表情状态机也得算「还忙」：紧张表情的最后 1 秒保持靠 tick 倒数，
     // 漏掉这一项的话扣费动画一停、帧循环就断，表情会永远卡在紧张上。
     nervousT > 0 || tariffT > 0 || exprBowlAlive || bowls.length > 0 || hearts.length > 0 || potPendT > 0 ||
+    headSquashT < HEAD_SQUASH_DUR ||
     patActive || patWaitingPotOff || patBlocked || patAccum > 0 || patMoveMs > 0
 }
 
@@ -2383,8 +2595,9 @@ function ensureTariff(force) {
 
 function toggleTariff() {
   if (!isDeepseekSource()) return
-  // 只显示 1 秒：到点自动回余额，不需要再点一次。
-  tariffT = 1.0
+  // 显示 state.tariffSeconds 秒（默认 2.5）：到点自动回余额，不需要再点一次。
+  // 时长可在右键菜单「平板峰谷时长」里改（0.5 ~ 60 秒）。
+  tariffT = clampTariffSeconds(state.tariffSeconds)
   ensureTariff(true)
   wake()
   draw()
@@ -2407,6 +2620,17 @@ function place() {
 }
 
 function cornerName() { return state.snapCorner === 'right' ? '右下角' : '左下角' }
+
+// 她在屏幕的哪一半 → 哪一侧的镜像。上游 SyncSideToPosition：**拖动过程中越过中线就翻**，
+// 而不是等松手才翻 —— 松手瞬间突然换一张脸像穿帮，拖过去时「转身」才自然。
+// 返回 true 表示这一帧换了边（需要重绘）。
+function syncSideToPosition() {
+  var want = (state.x + W / 2) > (window.innerWidth / 2) ? 'right' : 'left'
+  if (state.snapCorner === want) return false
+  state.snapCorner = want
+  return true
+}
+
 
 function snapToCorner() {
   var toX = state.snapCorner === 'right'
@@ -2615,14 +2839,28 @@ function drawPatHand(c) {
   var k = side / 454
   var dw = img.width * k
   var dh = img.height * k
-  var crownY = 40 * PAT_REF_SCALE * k
   var palmFx = PAT_PALM_X[idx] + PAT_PALM_BIAS_X
   var palmFy = PAT_PALM_Y[idx] + PAT_PALM_BIAS_Y
   var hp = headPoint()
-  var handX = hp.x - palmFx * dw
-  var handY = (typeof state.y === 'number' ? state.y : 0) + crownY - palmFy * dh
+  // 手是「从左下方伸进来」的一只胳膊，掌心在图像的 palmFx 处。
+  // 站在右边时整个场景镜像：手心要落在镜像后的头顶上，图像也要翻。
+  // 做法与上游一致 —— 先把**未镜像**的盒子算出来，再整体反射，
+  // 而不是「用镜像后的头当锚点、再把图像原地翻」：后者掌心会偏 (1-2·palmFx)·dw。
+  var bx = (typeof state.x === 'number') ? state.x : ANCHOR_MARGIN
+  var localHx = hp.x - bx
+  var handXLocal
+  if (isMirrored()) {
+    var hand0 = (W - localHx) - palmFx * dw      // 未镜像时的盒子左边
+    handXLocal = W - (hand0 + dw)                // 关于画布中线反射
+  } else {
+    handXLocal = localHx - palmFx * dw
+  }
+  var handX = bx + handXLocal
+  // 掌心直接落在**当前头顶锚点**上。之前用固定 crownY 算，没有加立绘在画布里的
+  // 垂直偏移，所以手会飘在头顶上方一大截（用户截图反馈）。
+  var handY = hp.y - palmFy * dh
   c.save()
-  if (state.snapCorner === 'right') {
+  if (isMirrored()) {
     // 镜像整只手，让它从她所在的那一侧伸进来（位置与图像一起翻）
     c.translate(Math.round(handX + dw / 2), 0)
     c.scale(-1, 1)
@@ -2734,6 +2972,7 @@ function onPointerDown(e) {
       heldBowl = hitBowl
       hitBowl.dragging = true
       hitBowl.homing = false   // 玩家一旦拿起锅，就不再自动追着头走（可以随手丢掉）
+      hitBowl.autoEmpty = false // 被拿起来过的锅，之后掉到头上可以正常扣上
       hitBowl.locked = false
       hitBowl.lockT = 0
       hitBowl.sucking = false
@@ -2799,6 +3038,8 @@ function onDragMove(e) {
   state.x = Math.max(0, Math.min(window.innerWidth - W, dragging.origX + dx))
   state.y = Math.max(0, Math.min(window.innerHeight - H, dragging.origY + dy))
   place()
+  // 越过中线立刻镜像（立绘 + 平板几何）；位置变化本身靠 CSS，只有换边需要重绘。
+  if (syncSideToPosition()) draw()
 }
 
 function onDragEnd() {
@@ -2817,7 +3058,7 @@ function onDragEnd() {
   }
   if (moved) {
     // 松手时她在屏幕哪一半，就吸附回哪一侧的下角（与上游一致）。
-    state.snapCorner = (state.x + W / 2) < (window.innerWidth / 2) ? 'left' : 'right'
+    syncSideToPosition()
     if (state.snapOnRelease) snapToCorner()
     else { saveState(); wake() }
   }
@@ -3019,10 +3260,16 @@ function setSoundOn(on) {
   if (state.soundOn) playCue('turn')
 }
 
+// 声音菜单第一层的模式开关：分音效调节 / 只用全部音量（两种视图互斥）
+function setSoundPerCue(on) {
+  state.soundPerCue = !!on
+  saveState()
+}
+
 function askVolume() {
   showPrompt({
     title: '全部音效音量',
-    label: '把所有音效统一设为这个音量（0 ~ 100）。之后仍可在「单独音效」里逐个调整。',
+    label: '把所有音效统一设为这个音量（0 ~ 100）。勾选「分音效调节音量」后还可以逐个调整。',
     value: state.volume,
     suffix: '%',
     onOk: function (v, msg) {
@@ -3082,6 +3329,51 @@ function askStep() {
         return false
       }
       setStep(cents / 100)
+      return true
+    },
+  })
+}
+
+// —— 平板峰谷视图显示时长 ——
+function tariffSecondsLabel(s) {
+  var n = Math.round(Number(s) * 10) / 10
+  return (isFinite(n) ? n : DEFAULT_TARIFF_SECONDS) + ' 秒'
+}
+
+function setTariffSeconds(sec) {
+  state.tariffSeconds = clampTariffSeconds(sec)
+  saveState()
+  // 正显示着就按新时长续上，改完立刻能看出来
+  if (tariffT > 0) tariffT = state.tariffSeconds
+  wake()
+  draw()
+}
+
+function askTariffSeconds() {
+  showPrompt({
+    title: '平板峰谷显示时长',
+    label: '单击平板后，峰谷视图显示多久？（' + TARIFF_SECONDS_MIN + ' ~ ' + TARIFF_SECONDS_MAX + ' 秒，默认 ' +
+      DEFAULT_TARIFF_SECONDS + ' 秒；保留一位小数）',
+    value: state.tariffSeconds,
+    suffix: '秒',
+    onOk: function (v, msg) {
+      var n = Number(String(v).replace(/，/g, '.').replace(/,/g, '.'))
+      if (!isFinite(n)) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入一个数字，例如 2.5 或 5'
+        return false
+      }
+      if (n < TARIFF_SECONDS_MIN || n > TARIFF_SECONDS_MAX) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '超出范围：' + n + ' 秒（应在 ' + TARIFF_SECONDS_MIN + ' ~ ' + TARIFF_SECONDS_MAX + ' 之间）'
+        return false
+      }
+      if (Math.abs(Math.round(n * 10) / 10 - n) > 1e-9) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '最多一位小数（例如 2.5 秒）'
+        return false
+      }
+      setTariffSeconds(n)
       return true
     },
   })
@@ -3262,6 +3554,18 @@ function mainMenu() {
       rows.push({ label: '返回', sub: mainMenu })
       return rows
     } },
+    { label: '平板峰谷时长（' + tariffSecondsLabel(state.tariffSeconds) + '）▸', sub: function () {
+      var rows = TARIFF_SECONDS_PRESETS.map(function (v) {
+        return {
+          label: (Math.abs(state.tariffSeconds - v) < 1e-9 ? '✓ ' : '　') + tariffSecondsLabel(v),
+          run: function () { setTariffSeconds(v) },
+        }
+      })
+      rows.push({ sep: true })
+      rows.push({ label: '自定义时长…', run: function () { askTariffSeconds() } })
+      rows.push({ label: '返回', sub: mainMenu })
+      return rows
+    } },
     { label: '尺寸 ▸', sub: function () {
       // 命名与「带 px 标注」沿用上游；本插件多一档小号，所以是四档
       return SIZE_PRESETS.map(function (px, i) {
@@ -3365,34 +3669,54 @@ function mainMenu() {
   return items
 }
 
-// 声音菜单：保留旧版的「全部音量」，另外每个音效都能单独调音量 / 换自定义音频。
+// 声音菜单：先选「是否分音效调节音量」。
+//   是 → 6 个音效各自的「音量 / 自定义音频」；
+//   否 → 只显示「全部音效音量」，但**自定义音频栏仍然显示**（需求：不勾选也要能换音频），
+//        只是其中不再出现逐个音效的音量档位。
 function soundMenu() {
   var off = !state.soundOn
+  var per = !!state.soundPerCue
   var items = [
     { label: (state.soundOn ? '✓ ' : '　') + '开启音效', run: function () { setSoundOn(!state.soundOn) } },
+    { label: (per ? '✓ ' : '　') + '分音效调节音量', run: function () { setSoundPerCue(!state.soundPerCue) } },
     { sep: true },
   ]
   if (off) items.push({ label: '音效已关闭，先勾选「开启音效」才能调整下面的选项', disabled: true })
-  items.push({ label: '全部音效音量', header: true })
-  VOLUME_STEPS.forEach(function (v) {
-    items.push({
-      label: (allCuesAt(v) ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
-      disabled: off,
-      run: function () { setVolume(v) },
-    })
-  })
-  items.push({ label: '自定义音量…', disabled: off, run: function () { askVolume() } })
-  items.push({ sep: true })
-  items.push({ label: '单独音效（音量 / 自定义）', header: true })
-  for (var i = 0; i < CUE_IDS.length; i++) {
-    ;(function (id) {
-      var custom = state.cueCustom[id]
+  if (per) {
+    items.push({ label: '单独音效（音量 / 自定义）', header: true })
+    for (var i = 0; i < CUE_IDS.length; i++) {
+      ;(function (id) {
+        var custom = state.cueCustom[id]
+        items.push({
+          label: CUE_LABELS[id] + '（' + cueVolume(id) + ' %' + (custom ? ' · 自定义' : '') + '）▸',
+          disabled: off,
+          sub: function () { return cueMenu(id) },
+        })
+      })(CUE_IDS[i])
+    }
+  } else {
+    items.push({ label: '全部音效音量', header: true })
+    VOLUME_STEPS.forEach(function (v) {
       items.push({
-        label: CUE_LABELS[id] + '（' + cueVolume(id) + ' %' + (custom ? ' · 自定义' : '') + '）▸',
+        label: (allCuesAt(v) ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
         disabled: off,
-        sub: function () { return cueMenu(id) },
+        run: function () { setVolume(v) },
       })
-    })(CUE_IDS[i])
+    })
+    items.push({ label: '自定义音量…', disabled: off, run: function () { askVolume() } })
+    // 自定义音频栏：与音量模式无关，始终显示；进去后只有试听 / 上传 / 恢复出厂。
+    items.push({ sep: true })
+    items.push({ label: '单独音效（自定义音频）', header: true })
+    for (var j = 0; j < CUE_IDS.length; j++) {
+      ;(function (id) {
+        var custom = state.cueCustom[id]
+        items.push({
+          label: CUE_LABELS[id] + '（' + (custom ? '自定义' : '出厂') + '）▸',
+          disabled: off,
+          sub: function () { return cueMenu(id) },
+        })
+      })(CUE_IDS[j])
+    }
   }
   items.push({ label: '返回', sub: mainMenu })
   return items
@@ -3401,18 +3725,23 @@ function soundMenu() {
 function cueMenu(id) {
   var off = !state.soundOn
   var custom = state.cueCustom[id]
-  var items = [
-    { label: '「' + CUE_LABELS[id] + '」音量', header: true },
-  ]
-  VOLUME_STEPS.forEach(function (v) {
-    items.push({
-      label: (cueVolume(id) === v ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
-      disabled: off,
-      run: function () { setCueVolume(id, v) },
+  // 全局音量模式下来到这里：只保留自定义音频，不再显示逐个音效的音量档位。
+  var audioOnly = !state.soundPerCue
+  var items = []
+  if (audioOnly) {
+    items.push({ label: '「' + CUE_LABELS[id] + '」自定义音频', header: true })
+  } else {
+    items.push({ label: '「' + CUE_LABELS[id] + '」音量', header: true })
+    VOLUME_STEPS.forEach(function (v) {
+      items.push({
+        label: (cueVolume(id) === v ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
+        disabled: off,
+        run: function () { setCueVolume(id, v) },
+      })
     })
-  })
-  items.push({ label: '自定义音量…', disabled: off, run: function () { askCueVolume(id) } })
-  items.push({ sep: true })
+    items.push({ label: '自定义音量…', disabled: off, run: function () { askCueVolume(id) } })
+    items.push({ sep: true })
+  }
   items.push({ label: '试听（音量 ' + cueVolume(id) + ' %）', disabled: off, run: function () { previewCue(id) } })
   items.push({ label: '上传自定义音效…（可截取片段）', disabled: off, run: function () { pickCustomCue(id) } })
   items.push({
