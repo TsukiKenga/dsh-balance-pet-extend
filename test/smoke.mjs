@@ -119,6 +119,7 @@ function makeCtx(record = true) {
       //   scale(sx, sy)         → 摸头的 petpet 弹性（sx>1、sy<1）
       //   transform(1,0,0,sy,..) → 铁锅回弹 / 平板跟随的竖直形变
       //   transform(a,b,c,d,..)  → 平板仿射矩阵；镜像后 c 由正变负
+      //   scale(sx,sy) x>1,y<1  → 米饭盆拖动的流体压扁
       if (k === 'scale') {
         if (!record) return () => {}
         return (x, y) => { SCALES.push({ x: x, y: y }) }
@@ -167,8 +168,8 @@ const LOGS = []         // 插件内部 console 输出（调试用）
 const TEXTS = []        // 被 fillText 画出的文字（雷达名牌读数）
 const FILLS = []        // 被 fillRect 画出的矩形（平板背景色）
 const ARCS = []         // 被 arc 画出的圆（雷达方向环）
-const SCALES = []       // 被 scale() 施加的缩放（镜像 / 摸头弹性）
-const TRANSFORMS = []   // 被 transform() 施加的矩阵（铁锅回弹 / 平板跟随形变 / 平板仿射）
+const SCALES = []       // 被 scale() 施加的缩放（镜像 / 摸头弹性 / 拖盆流体压扁）
+const TRANSFORMS = []   // 被 transform() 施加的矩阵（铁锅回弹 / 平板形变 / 拖盆剪切）
 let vnow = 0            // 虚拟时钟（毫秒）
 function makeEnv() {
   const documentEl = new El('html')
@@ -694,7 +695,7 @@ click(rowBy(menuRoot, '扣费时播放音效与动画')); await flush(6)   // �
 await openMenu(); click(rowBy(menuRoot, '功能选择')); await flush(6)
 click(rowBy(menuRoot, '充值后掉落米饭盆')); await flush(6)
 await openMenu(); click(rowBy(menuRoot, '测试充值')); await flush(4)
-click(rowBy(menuRoot, '¥3.00'))
+click(rowBy(menuRoot, '掉 1 盆饭'))
 DRAWS.length = 0
 await advance(0.2)
 ok('关掉掉盆后测试充值不生成米饭盆', !DRAWS.some((d) => d.src.includes('rice.png')),
@@ -881,11 +882,11 @@ async function oneFrame() { await advance(0.001) }
 function lastRiceCenter() {
   // 盆画在窗口级覆盖层上，用的是**视口坐标**，所以 drawImage 的中心就是点击点。
   const d = DRAWS.filter((x) => x.src.includes('rice.png')).slice(-1)[0]
-  return d ? { x: d.x + d.w / 2, y: d.y + d.h / 2 } : null
+  return d ? { x: d.x + d.w / 2, y: d.y + d.h / 2, r: d.w / 2 } : null
 }
 function lastIronCenter() {
   const d = DRAWS.filter((x) => x.src.includes('iron_bowl.png')).slice(-1)[0]
-  return d ? { x: d.x + d.w / 2, y: d.y + d.h / 2 } : null
+  return d ? { x: d.x + d.w / 2, y: d.y + d.h / 2, r: d.w / 2 } : null
 }
 // 一帧里画了几个盆（去重：同一个盆只会出现一次）
 function riceBowls() {
@@ -929,7 +930,7 @@ function spawnOne(amountLabel) {
     click(rowBy(menuRoot, '测试充值'))
     return flush(2)
   }).then(() => {
-    click(rowBy(menuRoot, amountLabel || '¥3.00'))
+    click(rowBy(menuRoot, amountLabel || '掉 1 盆饭'))
   })
 }
 // 拖盆：pointerdown 落在 document（捕获阶段），pointermove/up 落在 window
@@ -944,6 +945,10 @@ async function dragBowl(from, to, steps = 5) {
     })
     await flush(2)
   }
+  // 到达目标后停一下，让形变衰减；再在同一点补一次 pointermove
+  // 把「甩出速度」采样清零，避免松开时被残余速度带走。
+  win.fire('pointermove', { clientX: to.x, clientY: to.y })
+  await advance(0.45)
   win.fire('pointerup', { clientX: to.x, clientY: to.y })
   await flush(4)
 }
@@ -1016,6 +1021,136 @@ ok('盆彼此有碰撞体积（不叠成一堆）', overlapped === 0, overlapped
 // 清场
 await eatAllBowls()
 
+console.log('')
+console.log('=== 拖动米饭盆的流体形变惯性 ===')
+// 找一个落在她身体之外（不会一拿起就被投喂）的盆
+let dragStart = null
+for (let attempt = 0; attempt < 6 && !dragStart; attempt++) {
+  await spawnOne()
+  await advance(2.5)
+  const b = lastRiceCenter()
+  const pr = petRect()
+  if (b && pr && (b.x + b.r < pr.x || b.x - b.r > pr.x + pr.w)) dragStart = b
+  else await eatAllBowls()
+}
+const prInf = petRect()
+if (dragStart) {
+  const petCx = prInf ? prInf.x + prInf.w / 2 : win.innerWidth / 2
+  // 朝「远离她」的一侧甩
+  const dir = dragStart.x < petCx ? -1 : 1
+  const tx = Math.max(50, Math.min(win.innerWidth - 50, dragStart.x + dir * 230))
+  const ty = dragStart.y
+  SCALES.length = 0
+  TRANSFORMS.length = 0
+  doc.fire('pointerdown', { button: 0, clientX: dragStart.x, clientY: dragStart.y })
+  await flush(2)
+  win.fire('pointermove', { clientX: tx, clientY: ty })
+  await advance(0.15)
+  DRAWS.length = 0
+  await oneFrame()
+  const moved = lastRiceCenter()
+  ok('拖动时碗跟手（不再拖尾）', !!moved && Math.abs(moved.x - tx) < 6,
+    moved ? '碗 x=' + Math.round(moved.x) + '  指针 x=' + Math.round(tx) : '(没画到碗)')
+  const wantSign = dir > 0 ? -1 : 1
+  const shears = TRANSFORMS.filter((m) => m[0] === 1 && m[1] === 0 && m[3] === 1).map((m) => m[2])
+  const squashes = SCALES.filter((s) => s.x > 1.005 && s.y < 0.995)
+  ok('拖动时有流体形变（横向拉伸 + 竖向压扁 + 下半部分剪切）',
+    shears.some((a) => Math.sign(a) === wantSign && Math.abs(a) > 0.02) && squashes.length > 0,
+    '剪切 ' + shears.slice(-6).map((a) => a.toFixed(3)).join(' | ') +
+    '　压扁 ' + squashes.slice(-6).map((s) => s.x.toFixed(3) + 'x' + s.y.toFixed(3)).join(' | '))
+  // 停手：形变要回正
+  win.fire('pointermove', { clientX: tx, clientY: ty })
+  await advance(0.7)
+  SCALES.length = 0
+  TRANSFORMS.length = 0
+  await advance(0.12)
+  const shears2 = TRANSFORMS.filter((m) => m[0] === 1 && m[1] === 0 && m[3] === 1).map((m) => m[2])
+  const squashes2 = SCALES.filter((s) => s.x > 1.005 && s.y < 0.995)
+  ok('停手后流体形变回正', shears2.slice(-4).every((a) => Math.abs(a) < 0.02) && squashes2.length === 0,
+    '剪切 ' + shears2.slice(-4).map((a) => a.toFixed(3)).join(' | ') +
+    '　压扁 ' + squashes2.length + ' 次')
+  win.fire('pointerup', { clientX: tx, clientY: ty })
+  await flush(4)
+} else {
+  ok('拖动时碗跟手（不再拖尾）', false, '没找到不在她身上的米饭盆')
+  ok('拖动时有流体形变（横向拉伸 + 竖向压扁 + 下半部分剪切）', false, '没找到不在她身上的米饭盆')
+  ok('停手后流体形变回正', false, '没找到不在她身上的米饭盆')
+}
+await eatAllBowls()
+
+console.log('')
+console.log('=== 拖盆流体效果强度设置 ===')
+await openMenu()
+const fluidRow = rowBy(menuRoot, '拖盆流体效果')
+ok('菜单有「拖盆流体效果」', !!fluidRow, rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+ok('默认强度是 1.6×', !!fluidRow && fluidRow.textContent.includes('1.6×'), fluidRow ? fluidRow.textContent : '(missing)')
+click(fluidRow); await flush(6)
+const fluidRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('有 关闭 / 弱 / 标准 / 强 / 超强 五档',
+  ['关闭（无形变）', '弱（0.7×）', '标准（1×）', '强（1.6×）', '超强（2.4×）']
+    .every((s) => fluidRows.some((r) => r.includes(s))), fluidRows.join(' | '))
+ok('当前「强 1.6×」打勾', fluidRows.some((r) => r.includes('✓ 强（1.6×）')), fluidRows.join(' | '))
+click(rowBy(menuRoot, '超强')); await flush(6)
+await openMenu()
+ok('切到超强后菜单显示 2.4×', rowBy(menuRoot, '拖盆流体效果').textContent.includes('2.4×'),
+  rowBy(menuRoot, '拖盆流体效果').textContent)
+// 自定义强度：>2.5 被拒绝，2.0 生效
+click(rowBy(menuRoot, '拖盆流体效果')); await flush(6)
+click(rowBy(menuRoot, '自定义强度')); await flush(6)
+const fPrompt = doc.body.children.filter((c) => c.id === 'dshpet-prompt')[0]
+const fBox = fPrompt && fPrompt.children[0]
+const fInp = fBox && fBox.children.filter((c) => c.className === 'dshpet-prompt-row')[0].children[0]
+const fMsg = fBox && fBox.children.filter((c) => c.className.indexOf('dshpet-hol-msg') === 0)[0]
+const fOk = fBox && fBox.children.filter((c) => c.className.indexOf('dshpet-hol-actions') >= 0)[0].children[0]
+fInp.value = '3'
+click(fOk); await flush(4)
+ok('强度超过 2.5× 被拒绝', !!fMsg.textContent && /2\.5/.test(fMsg.textContent), fMsg.textContent)
+fInp.value = '2'
+click(fOk); await flush(4)
+await openMenu()
+ok('自定义 2× 生效', rowBy(menuRoot, '拖盆流体效果').textContent.includes('2×'),
+  rowBy(menuRoot, '拖盆流体效果').textContent)
+// 关闭：拖动时不应产生流体形变
+click(rowBy(menuRoot, '拖盆流体效果')); await flush(6)
+click(rowBy(menuRoot, '关闭（无形变）')); await flush(6)
+await openMenu()
+ok('关闭后菜单显示「关闭」', rowBy(menuRoot, '拖盆流体效果').textContent.includes('关闭'),
+  rowBy(menuRoot, '拖盆流体效果').textContent)
+
+let offBowl = null
+for (let attempt = 0; attempt < 6 && !offBowl; attempt++) {
+  await spawnOne()
+  await advance(2.5)
+  const b = lastRiceCenter()
+  const pr = petRect()
+  if (b && pr && (b.x + b.r < pr.x || b.x - b.r > pr.x + pr.w)) offBowl = b
+  else await eatAllBowls()
+}
+if (offBowl) {
+  const prOff = petRect()
+  const petCx2 = prOff ? prOff.x + prOff.w / 2 : win.innerWidth / 2
+  const dir2 = offBowl.x < petCx2 ? -1 : 1
+  const tx2 = Math.max(50, Math.min(win.innerWidth - 50, offBowl.x + dir2 * 200))
+  SCALES.length = 0
+  TRANSFORMS.length = 0
+  doc.fire('pointerdown', { button: 0, clientX: offBowl.x, clientY: offBowl.y })
+  await flush(2)
+  win.fire('pointermove', { clientX: tx2, clientY: offBowl.y })
+  await advance(0.15)
+  const shearsOff = TRANSFORMS.filter((m) => m[0] === 1 && m[1] === 0 && m[3] === 1).map((m) => m[2])
+  const squashesOff = SCALES.filter((s) => s.x > 1.005 && s.y < 0.995)
+  ok('关闭后拖动没有流体形变', shearsOff.length === 0 && squashesOff.length === 0,
+    '剪切 ' + shearsOff.length + ' 次 / 压扁 ' + squashesOff.length + ' 次')
+  win.fire('pointerup', { clientX: tx2, clientY: offBowl.y })
+  await flush(4)
+} else {
+  ok('关闭后拖动没有流体形变', false, '没找到不在她身上的米饭盆')
+}
+await eatAllBowls()
+// 恢复默认强度
+await openMenu(); click(rowBy(menuRoot, '拖盆流体效果')); await flush(6)
+click(rowBy(menuRoot, '强（1.6×）')); await flush(6)
+
 // ⑤ 【核心】拖动喂食 —— 上游：必须把盆**拖到**她身上才入账
 await spawnOne()
 await advance(2.5)
@@ -1066,7 +1201,53 @@ if (potDraw && sprDraw) {
   ok('铁锅扣在头部锚点上（≈0.68，不再是 0.5）', false, '缺绘制记录')
 }
 
-// ⑦ 双击她的头 → 把铁锅敲掉（上游是**双击**，不是单击）
+// ⑦ 头上有锅时，从上方落下的米饭盆会被锅体弹开
+console.log('')
+console.log('=== 头上有锅时，饭盆落在锅上会被弹开 ===')
+await spawnOne()
+DRAWS.length = 0
+await oneFrame()
+const bowlFall = lastRiceCenter()
+const potUnder = lastIronCenter()
+const prUnder = petRect()
+let bounceDx = 0
+if (bowlFall && potUnder && prUnder) {
+  // 先把桌宠（连同头上的锅）挪到盆的预计落点下方；不推进时间，盆还在顶部
+  const cursorY = prUnder.y + prUnder.h * 0.62
+  let cursorX = prUnder.x + prUnder.w * 0.5
+  doc.fire('pointerdown', { button: 0, clientX: cursorX, clientY: cursorY })
+  await flush(2)
+  cursorX += (bowlFall.x - potUnder.x)
+  win.fire('pointermove', { clientX: cursorX, clientY: cursorY })
+  await flush(2)
+  // 下落过程中持续把锅对准盆；接近锅顶时停手，让盆自己撞上去
+  let stopped = false
+  let impactPotX = 0
+  for (let i = 0; i < 110; i++) {
+    DRAWS.length = 0
+    await advance(0.02)
+    const b = lastRiceCenter()
+    const p = lastIronCenter()
+    if (!b || !p) break
+    if (!stopped && b.y < p.y - p.r * 1.6) {
+      cursorX += (b.x - p.x)
+      win.fire('pointermove', { clientX: cursorX, clientY: cursorY })
+    } else if (!stopped) {
+      stopped = true
+      impactPotX = p.x
+      win.fire('pointerup', { clientX: cursorX, clientY: cursorY })
+      await flush(2)
+    } else {
+      bounceDx = Math.max(bounceDx, Math.abs(b.x - impactPotX))
+    }
+  }
+  if (!stopped) win.fire('pointerup', { clientX: cursorX, clientY: cursorY })
+}
+ok('头上有锅时饭盆会被弹开（横向偏移）', bounceDx > 8, '最大横向偏移 ' + bounceDx.toFixed(1) + 'px')
+// 清掉这个测试盆（锅还留在头上，下一步再双击取锅）
+await eatAllBowls()
+
+// ⑧ 双击她的头 → 把铁锅敲掉（上游是**双击**，不是单击）
 // 现在支持堆叠：一次只取最上面那口锅，所以连点几次把所有锅都取下来。
 AUDIO_PLAYED.length = 0
 const pr1 = petRect()
@@ -1177,6 +1358,25 @@ ok('雷达开启后不是刚落地就吸走（≥ 2 秒）', radarFedAt >= 2, ra
 ok('雷达开启后 8 秒内一定捡完（阈值 3 秒）', radarFedAt >= 0 && radarFedAt <= 8, radarFedAt.toFixed(1) + ' 秒')
 // 关掉火控雷达，避免影响后续
 await openMenu(); click(rowBy(menuRoot, '打开火控雷达')); await flush(6)
+
+console.log('')
+console.log('=== 测试充值：掉 1 / 3 / 10 盆饭 ===')
+for (const preset of [['掉 1 盆饭', 1], ['掉 3 盆饭', 3], ['掉 10 盆饭', 10]]) {
+  const label = preset[0]
+  const count = preset[1]
+  await eatAllBowls()
+  await advance(0.5)
+  await openMenu(); click(rowBy(menuRoot, '测试充值')); await flush(4)
+  const row = rowBy(menuRoot, label)
+  ok('测试充值菜单有「' + label + '」', !!row, rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+  if (row) click(row)
+  await advance(0.3)
+  DRAWS.length = 0
+  await oneFrame()
+  const n = DRAWS.filter((d) => d.src.includes('rice.png')).length
+  ok(label + ' 真的掉下 ' + count + ' 个盆', n === count, '实际 ' + n + ' 个')
+}
+await eatAllBowls()
 
 console.log('')
 console.log('=== 自定义演示次数 / 测试充值金额 ===')

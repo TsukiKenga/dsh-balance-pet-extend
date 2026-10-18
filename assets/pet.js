@@ -218,6 +218,18 @@ var TARIFF_SECONDS_PRESETS = [1, 2, 2.5, 3, 5, 10]
 var TARIFF_SECONDS_MIN = 0.5
 var TARIFF_SECONDS_MAX = 60
 
+// —— 拖盆流体形变的强度（倍率，0 = 关闭）——
+// 默认「强 1.6×」：比 1× 明显得多；右键菜单可切 关闭 / 弱 / 标准 / 强 / 超强或自定义。
+var DEFAULT_FLUID_INTENSITY = 1.6
+var FLUID_INTENSITY_PRESETS = [
+  { v: 0, label: '关闭（无形变）' },
+  { v: 0.7, label: '弱（0.7×）' },
+  { v: 1, label: '标准（1×）' },
+  { v: 1.6, label: '强（1.6×）' },
+  { v: 2.4, label: '超强（2.4×）' },
+]
+var FLUID_INTENSITY_MAX = 2.5
+
 // —— 持久化状态 ——
 var state = {
   character: 'fish',
@@ -240,6 +252,8 @@ var state = {
   stepYuan: DEFAULT_STEP, // 每扣多少钱提示一次（最小 0.01 元）
   // 单击平板后峰谷视图显示多久（秒），默认 2.5
   tariffSeconds: DEFAULT_TARIFF_SECONDS,
+  // 拖饭盆的流体形变强度（倍率，0 = 关闭），默认强
+  fluidIntensity: DEFAULT_FLUID_INTENSITY,
   fxBowlDrop: true,     // 充值后掉米饭盆，手动拖取
   fxPat: true,          // 鼠标抚摸会开心
   fxHurt: true,         // 扣费时播放音效与动画
@@ -289,6 +303,7 @@ function loadState() {
     if (typeof o.source === 'string' && o.source) state.source = o.source
     if (typeof o.stepYuan === 'number' && isFinite(o.stepYuan)) state.stepYuan = clampStep(o.stepYuan)
     if (typeof o.tariffSeconds === 'number' && isFinite(o.tariffSeconds)) state.tariffSeconds = clampTariffSeconds(o.tariffSeconds)
+    if (typeof o.fluidIntensity === 'number' && isFinite(o.fluidIntensity)) state.fluidIntensity = clampFluidIntensity(o.fluidIntensity)
     if (typeof o.fxBowlDrop === 'boolean') state.fxBowlDrop = o.fxBowlDrop
     if (typeof o.fxPat === 'boolean') state.fxPat = o.fxPat
     if (typeof o.fxHurt === 'boolean') state.fxHurt = o.fxHurt
@@ -313,6 +328,15 @@ function clampTariffSeconds(s) {
   if (s < TARIFF_SECONDS_MIN) s = TARIFF_SECONDS_MIN
   if (s > TARIFF_SECONDS_MAX) s = TARIFF_SECONDS_MAX
   return s
+}
+// 拖盆流体强度：0 ~ 2.5 倍，保留一位小数（0 = 关闭）
+function clampFluidIntensity(v) {
+  v = Number(v)
+  if (!isFinite(v)) return DEFAULT_FLUID_INTENSITY
+  v = Math.round(v * 10) / 10
+  if (v < 0) v = 0
+  if (v > FLUID_INTENSITY_MAX) v = FLUID_INTENSITY_MAX
+  return v
 }
 
 // —— 运行时 ——
@@ -761,7 +785,9 @@ function newBowl(props) {
     iron: false, onHead: false, homing: false, autoEmpty: false,
     born: 0, restT: 0, grounded: false, amount: 0,
     locked: false, lockT: 0, sucking: false, suckSpeed: 0,
-    dragging: false, grabX: 0, grabY: 0,
+    dragging: false, grabX: 0, grabY: 0, targetX: 0, targetY: 0,
+    deform: 0, deformV: 0, shear: 0, shearV: 0,
+    prevTargetX: 0, prevTargetY: 0, targetVx: 0, targetVy: 0,
   }
   for (var k in props) { if (Object.prototype.hasOwnProperty.call(props, k)) b[k] = props[k] }
   return b
@@ -920,6 +946,106 @@ function separateBowls() {
   }
 }
 
+// ============================================================================
+// 拖动的「流体感」形变 / 头上铁锅的碰撞体积
+// ============================================================================
+// 有饭的米饭盆拖动时位置跟手，但整只盆像装了半碗水的软体：
+//   · 横向拖动 → 下半部分被甩在后面（剪切 shear）
+//   · 速度越快 → 横向拉宽、竖向压扁（squash & stretch）
+// 两个量都用阻尼弹簧驱动：手停下后半碗水还会来回晃几下再稳住。
+// 铁锅不参与（扣头需要精确落点）。
+var DEFORM_SPRING = 200        // 压扁 / 拉宽弹簧刚度（1/s²）
+var DEFORM_DAMP = 13           // 阻尼比约 0.46，会回弹 1~2 下
+var DEFORM_MAX = 0.20          // 最大横向拉伸 / 纵向压缩
+var SHEAR_SPRING = 150         // 剪切弹簧刚度（下半部分左右拖尾）
+var SHEAR_DAMP = 10            // 阻尼比约 0.41
+var SHEAR_MAX = 0.42           // 最大剪切量（相对盆高）
+function stepDragBowl(r, dt) {
+  var tx = (typeof r.targetX === 'number') ? r.targetX : r.x
+  var ty = (typeof r.targetY === 'number') ? r.targetY : r.y
+  // 位置直接跟手：流体感只体现在形变上，不再让盆落在指针后面
+  r.x = tx
+  r.y = ty
+  // 指针速度做一点平滑，避免只挪一帧时形变一闪而过；手停下后速度自然衰减到 0
+  var instVx = 0, instVy = 0
+  if (typeof r.prevTargetX === 'number' && dt > 1e-6) {
+    instVx = (tx - r.prevTargetX) / dt
+    instVy = (ty - (typeof r.prevTargetY === 'number' ? r.prevTargetY : ty)) / dt
+  }
+  r.prevTargetX = tx
+  r.prevTargetY = ty
+  var keep = Math.pow(0.0005, dt)
+  r.targetVx = (r.targetVx || 0) * keep + instVx * (1 - keep)
+  r.targetVy = (r.targetVy || 0) * keep + instVy * (1 - keep)
+  var speed = Math.sqrt(r.targetVx * r.targetVx + r.targetVy * r.targetVy)
+  // 强度倍率来自右键菜单（默认 1.6×，可关 / 可自定义）
+  var boost = clampFluidIntensity(state.fluidIntensity)
+  var speedRef = side * 5
+  var wantDeform = Math.min(1, speed / speedRef) * DEFORM_MAX * boost
+  // 向右拖 → 下半部分向左拖尾（负剪切）
+  var wantShear = Math.max(-1, Math.min(1, -r.targetVx / speedRef)) * SHEAR_MAX * boost
+  // 允许自定义到 2.5×，但要挡住离谱的极限形变
+  if (wantDeform > 0.45) wantDeform = 0.45
+  if (wantShear > 0.9) wantShear = 0.9
+  if (wantShear < -0.9) wantShear = -0.9
+  var n = Math.max(1, Math.ceil(dt / 0.016))
+  var h = dt / n
+  for (var i = 0; i < n; i++) {
+    var da = (wantDeform - r.deform) * DEFORM_SPRING - r.deformV * DEFORM_DAMP
+    r.deformV += da * h
+    r.deform += r.deformV * h
+    var sa = (wantShear - r.shear) * SHEAR_SPRING - r.shearV * SHEAR_DAMP
+    r.shearV += sa * h
+    r.shear += r.shearV * h
+  }
+}
+// 松手 / 投喂后形变快速衰减，不要一直歪着
+function settleBowlDeform(r, dt) {
+  if (!r.deform && !r.deformV && !r.shear && !r.shearV) return
+  var k = Math.max(0, 1 - dt * 12)
+  r.deform *= k
+  r.deformV *= k
+  r.shear *= k
+  r.shearV *= k
+  if (Math.abs(r.deform) < 0.002) { r.deform = 0; r.deformV = 0 }
+  if (Math.abs(r.shear) < 0.002) { r.shear = 0; r.shearV = 0 }
+}
+
+// 头上铁锅的碰撞体积：可见锅体约为 2r 宽、0.694r 高（iron_bowl.png 中间 34.7%）。
+// 碗从上方落下时按宽扁的 AABB 处理 —— 顶面反弹、侧面推开，并带一点横向滑开，
+// 这样「在锅上方松手」会看到碗被弹走，而不是穿过锅落到她头上。
+var POT_HIT_HALF_W = 0.86
+var POT_HIT_HALF_H = 0.3472
+function bounceRiceOffPot(r, p) {
+  var hw = p.r * POT_HIT_HALF_W
+  var hh = p.r * POT_HIT_HALF_H
+  var dx = r.x - p.x, dy = r.y - p.y
+  var ox = hw + r.r - Math.abs(dx)
+  var oy = hh + r.r - Math.abs(dy)
+  if (ox <= 0 || oy <= 0) return false
+  if (oy <= ox) {
+    // 竖向分离：从上面落下 → 顶面弹起。下落中的碗即使这一帧已经陷过锅心，也按顶面算，
+    // 避免低帧率时直接穿到锅下面去。
+    var signY = (dy < 0 || r.vy >= 0) ? -1 : 1
+    r.y = p.y + signY * (hh + r.r)
+    if ((signY < 0 && r.vy > 0) || (signY > 0 && r.vy < 0)) r.vy = -r.vy * RICE_RESTITUTION
+    // 锅沿是圆的：落点偏离中心时往旁边滑；正中落下也给一点随机侧向，免得卡在锅上
+    var edge = hw > 1 ? Math.max(-1, Math.min(1, dx / hw)) : 0
+    r.vx += edge * side * 0.9
+    if (Math.abs(r.vx) < side * 0.25) r.vx += (dx >= 0 ? 1 : -1) * side * 0.35
+    r.grounded = false
+  } else {
+    // 侧向分离：被锅沿推开
+    var signX = dx < 0 ? -1 : 1
+    r.x = p.x + signX * (hw + r.r)
+    if ((signX < 0 && r.vx > 0) || (signX > 0 && r.vx < 0)) r.vx = -r.vx * RICE_RESTITUTION
+    r.vx += signX * side * 0.6
+  }
+  // 被锅弹开不算「落地未接」，别让它在锅上越弹越接近翻脸计时
+  r.restT = 0
+  return true
+}
+
 function updateBowls(dt) {
   if (potPendT > 0) {
     potPendT -= dt
@@ -975,6 +1101,7 @@ function updateBowls(dt) {
     var r = bowls[i]
     if (r.fed) {
       r.fedT += dt
+      settleBowlDeform(r, dt)
       if (r.fedT >= FEED_FADE) {
         bowls.splice(i, 1)
         if (heldBowl === r) heldBowl = null
@@ -982,10 +1109,19 @@ function updateBowls(dt) {
       continue
     }
     r.born += dt
+    // 不是拿在手上的盆：形变快速归零（松手后不会一直歪着）
+    if (!r.dragging) settleBowlDeform(r, dt)
 
-    // —— 手拿着：位置交给指针，跳过物理；碰到她就喂 ——
+    // —— 手拿着：米饭盆跟手 + 流体形变，铁锅保持精确跟手；碰到她就喂 ——
     if (r.dragging) {
       r.restT = 0
+      if (r.iron) {
+        // 空锅要能精确放到头顶，所以仍然是「跟手」
+        if (typeof r.targetX === 'number') { r.x = r.targetX; r.y = r.targetY }
+      } else {
+        // 有饭的米饭盆：位置跟手，绕手握点做阻尼摆动（下半部分左右摇）
+        stepDragBowl(r, dt)
+      }
       if (!r.iron && bowlOnPet(r)) { feedBowl(r); continue }
       // 空锅第二次被拖回她身上时，直接扣到头上（不必松手让它再落一次）
       if (r.iron) {
@@ -1084,6 +1220,13 @@ function updateBowls(dt) {
       }
     }
 
+    // —— 头上的铁锅是实体：米饭盆落在上面会被弹开（从最上面那口锅开始判） ——
+    if (!r.iron && worn.length) {
+      for (var pk = worn.length - 1; pk >= 0; pk--) {
+        if (bounceRiceOffPot(r, worn[pk])) break
+      }
+    }
+
     // 「落地后 10 秒」—— 只在地面上待着时才累计（被拿起来就清零）
     if (r.grounded && Math.abs(r.vx) < RICE_SLIDE_STOP * 4) r.restT += dt
     else r.restT = 0
@@ -1171,6 +1314,18 @@ function drawRiceOn(c) {
     var size = r.r * 2
     c.save()
     if (r.fed) c.globalAlpha = Math.max(0, 1 - r.fedT / FEED_FADE)
+    // 拖动流体感：横向拉伸 + 竖向压扁，再叠一点「下半部分拖尾」的剪切。
+    // 绕手握点做；铁锅保持原样（扣头需要稳定落点）。
+    var deform = r.iron ? 0 : (r.deform || 0)
+    var shear = r.iron ? 0 : (r.shear || 0)
+    if (deform || shear) {
+      var px = r.x + (r.dragging ? (r.grabX || 0) : 0)
+      var py = r.y + (r.dragging ? (r.grabY || 0) : 0)
+      c.translate(px, py)
+      if (shear) c.transform(1, 0, shear, 1, 0, 0)
+      if (deform) c.scale(1 + deform, 1 - deform * 0.65)
+      c.translate(-px, -py)
+    }
     c.drawImage(img, r.x - r.r, r.y - r.r, size, size)
     c.restore()
   }
@@ -2912,10 +3067,10 @@ function onBowlDragMove(e) {
     throwVY = (e.clientY - lastPtrY) / dt
   }
   lastPtrX = e.clientX; lastPtrY = e.clientY; lastPtrT = t
-  heldBowl.x = e.clientX - heldBowl.grabX
-  heldBowl.y = e.clientY - heldBowl.grabY
-  heldBowl.vx = throwVX * 0.35
-  heldBowl.vy = throwVY * 0.35
+  // 只更新目标点：米饭盆的位置与形变由 updateBowls 的 stepDragBowl 处理，
+  // 铁锅则每帧直接对齐目标（扣头需要精确落点）。
+  heldBowl.targetX = e.clientX - heldBowl.grabX
+  heldBowl.targetY = e.clientY - heldBowl.grabY
   e.preventDefault()
 }
 
@@ -2926,9 +3081,8 @@ function onBowlDragEnd(e) {
   heldBowl = null
   if (!b) return
   b.dragging = false
-  b.x = e.clientX - b.grabX
-  b.y = e.clientY - b.grabY
-  // 松手带着甩出的速度飞出去 —— 这样可以把铁盆「扔」到她头顶让它自己落下去
+  // 位置已经在目标上（跟手）；形变会自己衰减，不再强行吸附。
+  // 甩出的速度仍然取光标轨迹采样，扔铁盆 / 甩米饭盆都靠它。
   b.vx = throwVX * 0.35
   b.vy = throwVY * 0.35
   b.bounces = 0
@@ -2979,6 +3133,19 @@ function onPointerDown(e) {
       hitBowl.restT = 0
       hitBowl.grabX = e.clientX - hitBowl.x
       hitBowl.grabY = e.clientY - hitBowl.y
+      // 拖动目标点先对齐当前位置，避免刚拿起就被弹簧拽一下
+      hitBowl.targetX = hitBowl.x
+      hitBowl.targetY = hitBowl.y
+      hitBowl.prevTargetX = hitBowl.targetX
+      hitBowl.prevTargetY = hitBowl.targetY
+      hitBowl.targetVx = 0
+      hitBowl.targetVy = 0
+      hitBowl.deform = 0
+      hitBowl.deformV = 0
+      hitBowl.shear = 0
+      hitBowl.shearV = 0
+      hitBowl.vx = 0
+      hitBowl.vy = 0
       throwVX = 0; throwVY = 0
       lastPtrX = e.clientX; lastPtrY = e.clientY; lastPtrT = nowMs()
       window.addEventListener('pointermove', onBowlDragMove, true)
@@ -3379,6 +3546,50 @@ function askTariffSeconds() {
   })
 }
 
+// —— 拖盆流体形变强度 ——
+function fluidIntensityLabel(v) {
+  var n = Math.round(Number(v) * 10) / 10
+  if (!isFinite(n)) n = DEFAULT_FLUID_INTENSITY
+  if (n <= 0) return '关闭'
+  return n + '×'
+}
+
+function setFluidIntensity(v) {
+  state.fluidIntensity = clampFluidIntensity(v)
+  saveState()
+  // 下一帧就按新强度算；正在拖着盆时能立刻看到
+  wake()
+}
+
+function askFluidIntensity() {
+  showPrompt({
+    title: '拖盆流体形变强度',
+    label: '0 ~ ' + FLUID_INTENSITY_MAX + ' 倍，0 = 关闭；默认 ' + DEFAULT_FLUID_INTENSITY + '×（强）。保留一位小数。',
+    value: state.fluidIntensity,
+    suffix: '×',
+    onOk: function (v, msg) {
+      var n = Number(String(v).replace(/，/g, '.').replace(/,/g, '.'))
+      if (!isFinite(n)) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入一个数字，例如 1.6 或 2'
+        return false
+      }
+      if (n < 0 || n > FLUID_INTENSITY_MAX) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '超出范围：' + n + '×（应在 0 ~ ' + FLUID_INTENSITY_MAX + ' 之间）'
+        return false
+      }
+      if (Math.abs(Math.round(n * 10) / 10 - n) > 1e-9) {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '最多一位小数（例如 1.6×）'
+        return false
+      }
+      setFluidIntensity(n)
+      return true
+    },
+  })
+}
+
 function setFx(which, on) {
   if (which === 'bowl') state.fxBowlDrop = !!on
   else if (which === 'pat') state.fxPat = !!on
@@ -3418,6 +3629,20 @@ function askDemoCount() {
   })
 }
 
+// 掉 N 盆饭：测试用，不真的加钱，只生成 N 个米饭盆。
+// 三个预设分别掉 1 / 3 / 10 盆；关掉「充值后掉落米饭盆」时只演示光环与飘字。
+function testTopUpBowls(count) {
+  var n = Math.max(1, Math.min(50, Math.floor(Number(count)) || 1))
+  if (!state.fxBowlDrop) {
+    appendLabel('+' + n + ' 盆', C_TOPUP)
+    topupTime = TOPUP_DURATION
+    wake()
+    return
+  }
+  for (var i = 0; i < n; i++) spawnRice(0)
+  wake()
+}
+
 function testTopUp(yuan) {
   var amount = Number(yuan)
   if (!isFinite(amount) || amount <= 0) return
@@ -3433,7 +3658,7 @@ function testTopUp(yuan) {
 function askTopUp() {
   showPrompt({
     title: '自定义测试充值金额',
-    label: '模拟充值多少元？只掉米饭盆，不会真的加钱。',
+    label: '模拟充值多少元？只掉一盆米饭，不会真的加钱。',
     value: 3,
     suffix: '元',
     onOk: function (v, msg) {
@@ -3587,6 +3812,19 @@ function mainMenu() {
         { label: '返回', sub: mainMenu },
       ]
     } },
+    { label: '拖盆流体效果（' + fluidIntensityLabel(state.fluidIntensity) + '）▸', sub: function () {
+      var rows = FLUID_INTENSITY_PRESETS.map(function (p) {
+        return {
+          label: (Math.abs(state.fluidIntensity - p.v) < 1e-9 ? '✓ ' : '　') + p.label,
+          run: function () { setFluidIntensity(p.v) },
+        }
+      })
+      rows.push({ sep: true })
+      rows.push({ label: '0 = 关闭；数值越大，拖动时晃得越明显', disabled: true })
+      rows.push({ label: '自定义强度…', run: function () { askFluidIntensity() } })
+      rows.push({ label: '返回', sub: mainMenu })
+      return rows
+    } },
     { label: '功能选择 ▸', sub: function () {
       return [
         { label: (state.fxBowlDrop ? '✓ ' : '　') + '充值后掉落米饭盆，手动拖取',
@@ -3638,13 +3876,13 @@ function mainMenu() {
     { label: '网络自检…', run: function () { showSelfCheck() } },
     { label: '测试一次扣费（-' + stepLabel() + '）', run: function () { playDemo(1) } },
     { label: '测试充值 ▸', sub: function () {
-      var tail = state.fxBowlDrop ? '（掉一个米饭盆）' : '（仅演示，不掉盆）'
+      var tail = state.fxBowlDrop ? '' : '（仅演示，不掉盆）'
       return [
-        { label: '¥3.00' + tail, run: function () { testTopUp(3) } },
-        { label: '¥10.00' + tail, run: function () { testTopUp(10) } },
-        { label: '¥50.00' + tail, run: function () { testTopUp(50) } },
+        { label: '掉 1 盆饭' + tail, run: function () { testTopUpBowls(1) } },
+        { label: '掉 3 盆饭' + tail, run: function () { testTopUpBowls(3) } },
+        { label: '掉 10 盆饭' + tail, run: function () { testTopUpBowls(10) } },
         { sep: true },
-        { label: '自定义金额…', run: function () { askTopUp() } },
+        { label: '自定义金额…（掉 1 盆）', run: function () { askTopUp() } },
         { label: '返回', sub: mainMenu },
       ]
     } },
