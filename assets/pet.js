@@ -326,7 +326,7 @@ var sourceKind = 'balance'
 var quotaRemain = null         // 0..100（宿主已统一换算成「剩余 %」）
 var quotaLabel = ''
 // —— 平板峰谷彩蛋（只对 DSH 账户余额 / DeepSeek 生效）——
-var tariffMode = false         // 点击平板切换
+var tariffT = 0                // >0：平板显示峰谷彩蛋的剩余秒数（点击后 1 秒）
 var tariff = null              // { peak, label, nextLabel, nextAt, beijing }
 var tariffLoading = false
 // —— 节假日清单状态（宿主下发，用于过期/跨年提示）——
@@ -507,8 +507,12 @@ var RICE_SLIDE_FRICTION = 1.40 // 上游 RiceSlideFriction
 var RICE_SLIDE_STOP = 14       // 上游 RiceSlideStop（px/s，低于它就停下）
 var HEART_LIFE = 1.5
 var FEED_FADE = 0.5
-// 铁锅堆叠：相邻两个锅的垂直间距 = 锅高的 2/3（稍微重叠，像一摞碗）
+// 铁锅堆叠：相邻两个锅的**可见锅体**间距 = 锅高的 2/3（稍微重叠，像一摞碗）。
+// iron_bowl.png 是 2880×2880 的方图，锅体只占中间约 34.7% 的高度；
+// 若按整张方图算间距，看起来就会是一段一段悬空的（用户反馈的 bug）。
+var IRON_VISIBLE_H = 0.3472
 var IRON_STACK_GAP = 2 / 3
+function ironStackStep(r) { return r * 2 * IRON_VISIBLE_H * IRON_STACK_GAP }
 // 只有「下落」才能扣在头上：锅的向下速度低于这个值视为「放上去」，不算
 var IRON_SEAT_MIN_FALL = 30    // px/s
 
@@ -652,7 +656,7 @@ function newBowl(props) {
   var b = {
     x: 0, y: 0, vx: 0, vy: 0, r: 10,
     bounces: 0, fed: false, fedT: 0,
-    iron: false, onHead: false,
+    iron: false, onHead: false, homing: false,
     born: 0, restT: 0, grounded: false, amount: 0,
     locked: false, lockT: 0, sucking: false,
     dragging: false, grabX: 0, grabY: 0,
@@ -699,6 +703,8 @@ function spawnIronPot() {
     y: -rp,
     r: rp,
     iron: true,
+    // 自动掉落的空锅会跟着她的头横向修正，避免她走动后锅落在地上
+    homing: true,
   }))
   wake()
 }
@@ -813,7 +819,7 @@ function updateBowls(dt) {
     var wp = worn[ws]
     wp.headSlot = ws
     wp.x = hp.x
-    wp.y = hp.y - ws * (wp.r * 2 * IRON_STACK_GAP)
+    wp.y = hp.y - ws * ironStackStep(wp.r)
   }
   exprPotOnHead = worn.length > 0
 
@@ -857,14 +863,22 @@ function updateBowls(dt) {
     // —— 扣在头上：位置已经由上面的堆叠重排写好，这里只跳过物理 ——
     if (r.onHead) continue
 
+    // —— 自动掉落的锅：边落边横向追着她的头，避免她走动后锅落在空地上 ——
+    if (r.iron && r.homing && r.y < hp.y) {
+      // 直接对齐头顶：自动掉的锅不该因为她在移动就落到地上
+      r.x = hp.x
+      r.vx = 0
+    }
+
     // —— 铁锅落到头顶高度、且横向也在头附近 → 扣上 ——
     // 只有**下落**（vy >= IRON_SEAT_MIN_FALL）才算，松手「放」在她头上不算；
     // 有堆叠时目标高度是最上面那口锅的锅沿。
     if (r.iron && r.vy >= IRON_SEAT_MIN_FALL) {
-      var seatY = hp.y - worn.length * (r.r * 2 * IRON_STACK_GAP)
+      var seatY = hp.y - worn.length * ironStackStep(r.r)
       if ((r.y + r.r * 0.35) >= seatY && r.y <= seatY + r.r * 1.5 &&
           Math.abs(r.x - hp.x) <= spriteRect.w * 0.30) {
         r.onHead = true
+        r.homing = false
         r.headSlot = worn.length
         r.x = hp.x
         r.y = seatY
@@ -1313,13 +1327,57 @@ function drawTablet(ch, shakeX, shakeY, dpr) {
   // 金额类显示钱；订阅额度类没有金额，显示「剩余 %」（宿主已把各家的
   // 「已用 %」「剩余 %」两种语义统一成剩余百分比）
   var isQuota = sourceKind === 'quota'
-  var showTariff = tariffMode && !isQuota && isDeepseekSource()
+  var showTariff = tariffT > 0 && !isQuota && isDeepseekSource()
   var isConn = connected
   var value = isQuota
     ? (quotaRemain === null || !isFinite(quotaRemain) ? '--' : Math.round(quotaRemain) + '%')
     : moneyString(displayedUnits())
 
-  // 标题：DeepSeek 用「DSH 账户余额」，其它来源显示该来源名。
+  if (showTariff) {
+    // 点击平板后只显示 1 秒：背景峰价红 / 谷价绿，金额区完全换成「梁文峰 / 梁文谷」。
+    // 1 秒结束自动回到余额，不需要再点一次。
+    if (tariff && tariffRemainSec() <= 0) ensureTariff(true)
+    var peakNow = !!(tariff && tariff.peak)
+    var bg = tariff ? (peakNow ? '#c62828' : '#2e7d32') : '#455a64'
+    c.fillStyle = bg
+    c.fillRect(0, 0, pw, ph)
+
+    var titleSize2 = ph * PANEL_TITLE_RATIO
+    c.textAlign = 'center'
+    c.textBaseline = 'middle'
+    c.fillStyle = 'rgba(255,255,255,0.86)'
+    c.font = 'bold ' + titleSize2 + 'px system-ui, "Segoe UI", sans-serif'
+    c.fillText('峰谷时段', pw / 2, ph - ph * PANEL_TITLE_Y_RATIO)
+
+    var tName = tariff ? tariff.label : '峰谷时段'
+    var tNext = tariff ? (tariff.nextLabel + ' ' + fmtDuration(tariffRemainSec())) : '正在读取…'
+    var nameSize = ph * PANEL_AMOUNT_RATIO
+    var subSize = ph * 0.16
+    var rowY2 = ph - ph * PANEL_ROW_RATIO
+    c.fillStyle = '#ffffff'
+    c.font = 'bold ' + nameSize + 'px system-ui, "Segoe UI", sans-serif'
+    var nameW = c.measureText(tName).width
+    var nameScale = nameW > pw * PANEL_MAX_TEXT_RATIO ? pw * PANEL_MAX_TEXT_RATIO / nameW : 1
+    c.save()
+    c.translate(pw / 2, rowY2)
+    c.scale(nameScale, nameScale)
+    c.textAlign = 'center'
+    c.fillText(tName, 0, 0)
+    c.restore()
+    c.fillStyle = 'rgba(255,255,255,0.88)'
+    c.font = 'bold ' + subSize + 'px ui-monospace, "SF Mono", Consolas, monospace'
+    c.textAlign = 'center'
+    c.fillText(tNext, pw / 2, rowY2 + ph * 0.18)
+
+    c.beginPath()
+    c.arc(pw * DOT_X_RATIO, ph - ph * DOT_Y_RATIO, DOT_SIZE / 2, 0, Math.PI * 2)
+    c.fillStyle = 'rgba(255,255,255,0.92)'
+    c.fill()
+    c.setTransform(dpr, 0, 0, dpr, 0, 0)
+    return
+  }
+
+  // 标题：内置来源显示「DSH 账户余额」，其它来源显示该来源名。
   // 面板只有 400 宽，名字长了就等比缩小，别顶出平板。
   // 原版标题 y 自**面板底部**起算，面板坐标系 y 向下，所以这里翻过来。
   var titleSize = ph * PANEL_TITLE_RATIO
@@ -1334,37 +1392,6 @@ function drawTablet(ch, shakeX, shakeY, dpr) {
   c.fillText(sourceLabel, pw / 2, ph - ph * PANEL_TITLE_Y_RATIO)
 
   var rowY = ph - ph * PANEL_ROW_RATIO
-  if (showTariff) {
-    // 点击平板：金额区切换成「梁文峰 / 梁文谷 + 距峰/谷时」。
-    // 再点一下切回余额；来源不是 DeepSeek 时这个彩蛋不生效。
-    if (tariff && tariffRemainSec() <= 0) ensureTariff(true)
-    var tName = tariff ? tariff.label : '峰谷时段'
-    var tNext = tariff ? (tariff.nextLabel + ' ' + fmtDuration(tariffRemainSec())) : '正在读取…'
-    var nameSize = ph * PANEL_AMOUNT_RATIO
-    var subSize = ph * 0.16
-    c.fillStyle = isConn ? C_VALUE : C_VALUE_OFF
-    c.font = 'bold ' + nameSize + 'px system-ui, "Segoe UI", sans-serif'
-    var nameW = c.measureText(tName).width
-    var nameScale = nameW > pw * PANEL_MAX_TEXT_RATIO ? pw * PANEL_MAX_TEXT_RATIO / nameW : 1
-    c.save()
-    c.translate(pw / 2, rowY)
-    c.scale(nameScale, nameScale)
-    c.textAlign = 'center'
-    c.fillText(tName, 0, 0)
-    c.restore()
-    c.fillStyle = C_LABEL
-    c.font = 'bold ' + subSize + 'px ui-monospace, "SF Mono", Consolas, monospace'
-    c.textAlign = 'center'
-    c.fillText(tNext, pw / 2, rowY + ph * 0.18)
-    // 状态点与余额模式保持一致
-    c.beginPath()
-    c.arc(pw * DOT_X_RATIO, ph - ph * DOT_Y_RATIO, DOT_SIZE / 2, 0, Math.PI * 2)
-    c.fillStyle = lastError ? '#ff3b30' : (isConn ? '#34c759' : '#ffcc00')
-    c.fill()
-    c.setTransform(dpr, 0, 0, dpr, 0, 0)
-    return
-  }
-
   // 金额行：币种符号与数字两个字号；整行超过面板宽度 90% 就整体缩放
   var amtSize = ph * PANEL_AMOUNT_RATIO
   var curSize = ph * PANEL_CUR_RATIO
@@ -1574,6 +1601,18 @@ function playCue(name) {
 
 function playSound() { playCue('hit') }
 
+// 关闭「开启音效」时，正在播放的长音效（尤其是用户上传的自定义音频）也要立即停住；
+// 只把标志置 false 不会让已经 play() 的 <audio> 停下来。
+function stopAllCues() {
+  for (var key in cuePools) {
+    if (!Object.prototype.hasOwnProperty.call(cuePools, key)) continue
+    var pool = cuePools[key]
+    for (var i = 0; i < pool.length; i++) {
+      try { pool[i].pause(); pool[i].currentTime = 0 } catch (err) {}
+    }
+  }
+}
+
 function audioExt(name) {
   var m = /\.([a-z0-9]+)$/i.exec(String(name || ''))
   return m ? m[1].toLowerCase() : ''
@@ -1612,6 +1651,7 @@ function setVolume(v) {
   for (var i = 0; i < CUE_IDS.length; i++) state.cueVolume[CUE_IDS[i]] = pct
   // 与上游一致：0% 就是静音，所以开关必须跟着走，否则菜单会出现「声音开着但没声」
   state.soundOn = pct > 0
+  if (!state.soundOn) stopAllCues()
   saveState()
   // 放一小段，让新音量立刻听得出来
   if (state.soundOn) playCue('turn')
@@ -1702,23 +1742,259 @@ function applyCustomBlob(cue, blob, name) {
   }).catch(function () { return false })
 }
 
-function readFileAsBlob(file) {
-  if (file && typeof file.slice === 'function') return Promise.resolve(file)
-  return new Promise(function (resolve) { resolve(null) })
-}
-
 function useCustomCue(cue, file) {
   var problem = audioFileProblem(file)
   if (problem) { showToast(problem, false); return Promise.resolve(false) }
-  return readFileAsBlob(file).then(function (blob) {
-    if (!blob) { showToast('无法读取这个文件', false); return false }
-    return applyCustomBlob(cue, blob, file.name).then(function (ok) {
-      if (!ok) { showToast('自定义音效保存失败', false); return false }
-      showToast('已应用自定义音效：' + file.name, true)
-      playCue(cue)
-      return true
+  // 选中文件后先进入「截取片段」编辑器；也可以直接使用完整音频。
+  openTrimEditor(cue, file)
+  return Promise.resolve(true)
+}
+
+// —— 截取音频片段 ——
+// 选中文件后不能直接整段使用：先给一个 0 ~ duration 的起点/终点选择器，
+// 保存时用 Web Audio 解码并按采样点裁成 WAV，这样每个音效都能只用其中一段。
+var trimOverlay = null
+
+function readFileBuffer(file) {
+  return new Promise(function (resolve, reject) {
+    try {
+      var fr = new FileReader()
+      fr.onload = function () { resolve(fr.result) }
+      fr.onerror = function () { reject(new Error('读取文件失败')) }
+      fr.readAsArrayBuffer(file)
+    } catch (err) { reject(err) }
+  })
+}
+
+function decodeAudioFile(file) {
+  var AC = (typeof window !== 'undefined') && (window.AudioContext || window.webkitAudioContext)
+  if (!AC) return Promise.reject(new Error('当前环境不支持 Web Audio'))
+  return readFileBuffer(file).then(function (buf) {
+    return new Promise(function (resolve, reject) {
+      var ctx
+      try { ctx = new AC() } catch (err) { reject(err); return }
+      var done = false
+      function ok(b) {
+        if (done) return
+        done = true
+        try { ctx.close() } catch (err) {}
+        resolve(b)
+      }
+      function bad(err) {
+        if (done) return
+        done = true
+        try { ctx.close() } catch (e) {}
+        reject(err || new Error('无法解码音频'))
+      }
+      try {
+        var ret = ctx.decodeAudioData(buf, ok, bad)
+        if (ret && typeof ret.then === 'function') ret.then(ok, bad)
+      } catch (err) { bad(err) }
     })
   })
+}
+
+function encodeWav(buffer, startSec, endSec) {
+  var rate = buffer.sampleRate
+  var channels = Math.max(1, buffer.numberOfChannels)
+  var start = Math.max(0, Math.floor(startSec * rate))
+  var end = Math.min(buffer.length, Math.ceil(endSec * rate))
+  if (end <= start) end = Math.min(buffer.length, start + 1)
+  var frames = Math.max(1, end - start)
+  var bytesPerSample = 2
+  var dataSize = frames * channels * bytesPerSample
+  var ab = new ArrayBuffer(44 + dataSize)
+  var dv = new DataView(ab)
+  var off = 0
+  function str(s) { for (var i = 0; i < s.length; i++) dv.setUint8(off++, s.charCodeAt(i)) }
+  function u32(v) { dv.setUint32(off, v, true); off += 4 }
+  function u16(v) { dv.setUint16(off, v, true); off += 2 }
+  str('RIFF'); u32(36 + dataSize); str('WAVE')
+  str('fmt '); u32(16); u16(1); u16(channels); u32(rate); u32(rate * channels * bytesPerSample)
+  u16(channels * bytesPerSample); u16(16)
+  str('data'); u32(dataSize)
+  var data = []
+  for (var c = 0; c < channels; c++) data.push(buffer.getChannelData(c))
+  for (var i = 0; i < frames; i++) {
+    for (var ch = 0; ch < channels; ch++) {
+      var s = data[ch][start + i] || 0
+      s = Math.max(-1, Math.min(1, s))
+      dv.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true)
+      off += 2
+    }
+  }
+  return new Blob([ab], { type: 'audio/wav' })
+}
+
+function trimAudioFile(file, startSec, endSec) {
+  return decodeAudioFile(file).then(function (buffer) {
+    return encodeWav(buffer, startSec, endSec)
+  })
+}
+
+function closeTrimEditor() {
+  var o = trimOverlay
+  if (!o) return
+  trimOverlay = null
+  try { if (o.previewTimer) clearInterval(o.previewTimer) } catch (err) {}
+  try { if (o.audio) o.audio.pause() } catch (err) {}
+  try { document.removeEventListener('keydown', o.onKey, true) } catch (err) {}
+  try { if (o.url) URL.revokeObjectURL(o.url) } catch (err) {}
+  try { if (o.root.parentNode) o.root.parentNode.removeChild(o.root) } catch (err) {}
+}
+
+function openTrimEditor(cue, file) {
+  closeTrimEditor()
+  var url = ''
+  try { url = URL.createObjectURL(file) } catch (err) { showToast('无法读取这个文件', false); return }
+  var root = document.createElement('div')
+  root.id = 'dshpet-trim'
+  var box = document.createElement('div')
+  box.className = 'dshpet-trim-box'
+
+  var title = document.createElement('div')
+  title.className = 'dshpet-trim-title'
+  title.textContent = '截取音效片段 · ' + CUE_LABELS[cue]
+  var sub = document.createElement('div')
+  sub.className = 'dshpet-trim-sub'
+  sub.textContent = file.name + '（可拖动起点 / 终点，只保存选中的那一段）'
+
+  var audio = document.createElement('audio')
+  audio.className = 'dshpet-trim-audio'
+  audio.controls = true
+  audio.preload = 'metadata'
+  audio.src = url
+
+  function rangeRow(labelText) {
+    var row = document.createElement('div')
+    row.className = 'dshpet-trim-row'
+    var lab = document.createElement('span')
+    lab.className = 'dshpet-trim-label'
+    lab.textContent = labelText
+    var inp = document.createElement('input')
+    inp.type = 'range'
+    inp.className = 'dshpet-trim-range'
+    inp.min = '0'; inp.max = '1'; inp.step = '0.01'; inp.value = '0'
+    var val = document.createElement('span')
+    val.className = 'dshpet-trim-time'
+    val.textContent = '0.00 s'
+    row.appendChild(lab); row.appendChild(inp); row.appendChild(val)
+    box.appendChild(row)
+    return { inp: inp, val: val }
+  }
+
+  box.appendChild(title); box.appendChild(sub); box.appendChild(audio)
+  var startRow = rangeRow('起点')
+  var endRow = rangeRow('终点')
+  var msg = document.createElement('div')
+  msg.className = 'dshpet-trim-msg'
+  box.appendChild(msg)
+
+  var actions = document.createElement('div')
+  actions.className = 'dshpet-trim-actions'
+  var previewBtn = document.createElement('button')
+  previewBtn.type = 'button'; previewBtn.className = 'dshpet-hol-btn'; previewBtn.textContent = '试听片段'
+  var fullBtn = document.createElement('button')
+  fullBtn.type = 'button'; fullBtn.className = 'dshpet-hol-btn'; fullBtn.textContent = '使用完整音频'
+  var saveBtn = document.createElement('button')
+  saveBtn.type = 'button'; saveBtn.className = 'dshpet-hol-btn dshpet-hol-primary'; saveBtn.textContent = '保存片段'
+  var cancelBtn = document.createElement('button')
+  cancelBtn.type = 'button'; cancelBtn.className = 'dshpet-hol-btn'; cancelBtn.textContent = '取消'
+  actions.appendChild(previewBtn); actions.appendChild(fullBtn); actions.appendChild(saveBtn); actions.appendChild(cancelBtn)
+  box.appendChild(actions)
+  root.appendChild(box)
+  ;(document.body || document.documentElement).appendChild(root)
+
+  var o = { root: root, audio: audio, url: url, previewTimer: 0 }
+  trimOverlay = o
+  var duration = 0
+
+  function fmt(sec) { return (Math.round(sec * 100) / 100).toFixed(2) + ' s' }
+  function readRange() {
+    var a = Number(startRow.inp.value) || 0
+    var b = Number(endRow.inp.value) || 0
+    if (b < a + 0.05) b = Math.min(duration, a + 0.05)
+    if (b <= a) b = Math.min(duration, a + 0.05)
+    return { start: a, end: b }
+  }
+  function sync() {
+    var r = readRange()
+    if (Number(startRow.inp.value) !== r.start) startRow.inp.value = String(r.start)
+    if (Number(endRow.inp.value) !== r.end) endRow.inp.value = String(r.end)
+    startRow.val.textContent = fmt(r.start)
+    endRow.val.textContent = fmt(r.end)
+    msg.textContent = '已选 ' + fmt(r.start) + ' ~ ' + fmt(r.end) + '（' + fmt(Math.max(0, r.end - r.start)) + '）'
+    msg.className = 'dshpet-trim-msg is-ok'
+  }
+  function stopPreview() {
+    if (o.previewTimer) { clearInterval(o.previewTimer); o.previewTimer = 0 }
+    try { audio.pause() } catch (err) {}
+  }
+  startRow.inp.addEventListener('input', sync)
+  endRow.inp.addEventListener('input', sync)
+  audio.addEventListener('loadedmetadata', function () {
+    duration = isFinite(audio.duration) ? audio.duration : 0
+    if (!(duration > 0)) { msg.textContent = '读不到音频时长，可以直接使用完整音频'; msg.className = 'dshpet-trim-msg is-err'; return }
+    startRow.inp.max = String(duration); endRow.inp.max = String(duration)
+    startRow.inp.value = '0'; endRow.inp.value = String(duration)
+    sync()
+  })
+  audio.addEventListener('error', function () {
+    msg.textContent = '浏览器无法解码这个文件，请换 mp3 / wav / ogg / m4a 等格式'
+    msg.className = 'dshpet-trim-msg is-err'
+  })
+
+  previewBtn.addEventListener('click', function () {
+    var r = readRange()
+    if (!(duration > 0)) return
+    stopPreview()
+    try { audio.currentTime = r.start } catch (err) { return }
+    var p = audio.play()
+    if (p && p.catch) p.catch(function () {})
+    o.previewTimer = setInterval(function () {
+      if (audio.paused) { stopPreview(); return }
+      if (audio.currentTime >= r.end - 0.01) stopPreview()
+    }, 40)
+  })
+
+  fullBtn.addEventListener('click', function () {
+    stopPreview()
+    applyCustomBlob(cue, file, file.name).then(function (ok) {
+      if (!ok) { msg.textContent = '保存失败'; msg.className = 'dshpet-trim-msg is-err'; return }
+      closeTrimEditor()
+      showToast('已应用完整音频：' + file.name, true)
+      playCue(cue)
+    })
+  })
+
+  saveBtn.addEventListener('click', function () {
+    var r = readRange()
+    if (!(duration > 0)) { msg.textContent = '读不到音频时长，只能使用完整音频'; msg.className = 'dshpet-trim-msg is-err'; return }
+    if (!(r.end > r.start + 0.04)) { msg.textContent = '片段太短了，至少 0.05 秒'; msg.className = 'dshpet-trim-msg is-err'; return }
+    saveBtn.disabled = true
+    msg.textContent = '正在裁剪…'
+    msg.className = 'dshpet-trim-msg'
+    stopPreview()
+    var base = String(file.name || 'custom').replace(/\.[a-z0-9]+$/i, '')
+    trimAudioFile(file, r.start, r.end).then(function (blob) {
+      return applyCustomBlob(cue, blob, base + '-片段.wav')
+    }).then(function (ok) {
+      saveBtn.disabled = false
+      if (!ok) { msg.textContent = '裁剪后保存失败'; msg.className = 'dshpet-trim-msg is-err'; return }
+      closeTrimEditor()
+      showToast('已应用片段：' + fmt(r.start) + ' ~ ' + fmt(r.end), true)
+      playCue(cue)
+    }).catch(function (err) {
+      saveBtn.disabled = false
+      msg.textContent = '无法裁剪：' + String((err && err.message) || err) + '（可改用完整音频）'
+      msg.className = 'dshpet-trim-msg is-err'
+    })
+  })
+
+  cancelBtn.addEventListener('click', closeTrimEditor)
+  o.onKey = function (ev) { if (ev.key === 'Escape') closeTrimEditor() }
+  document.addEventListener('keydown', o.onKey, true)
+  sync()
 }
 
 function restoreFactoryCue(cue) {
@@ -1778,6 +2054,7 @@ function tick(dt) {
   if (celebrateTime > 0) celebrateTime = Math.max(0, celebrateTime - dt)
   if (topupTime > 0) topupTime = Math.max(0, topupTime - dt)
   if (nervousT > 0) nervousT = Math.max(0, nervousT - dt)
+  if (tariffT > 0) tariffT = Math.max(0, tariffT - dt)
   updateBowls(dt)
   updateHearts(dt)
   updatePat(dt)
@@ -1838,7 +2115,7 @@ function needsAnimation() {
     floating.length > 0 || pendingUnits > 0 || demoRemaining > 0 || !!snapAnim ||
     // 表情状态机也得算「还忙」：紧张表情的最后 1 秒保持靠 tick 倒数，
     // 漏掉这一项的话扣费动画一停、帧循环就断，表情会永远卡在紧张上。
-    nervousT > 0 || exprBowlAlive || bowls.length > 0 || hearts.length > 0 || potPendT > 0 ||
+    nervousT > 0 || tariffT > 0 || exprBowlAlive || bowls.length > 0 || hearts.length > 0 || potPendT > 0 ||
     patActive || patWaitingPotOff || patBlocked || patAccum > 0 || patMoveMs > 0
 }
 
@@ -2018,7 +2295,7 @@ function setSource(id) {
   sourceKind = 'balance'
   quotaRemain = null
   quotaLabel = ''
-  tariffMode = false
+  tariffT = 0
   tariff = null
   previousWasDisconnected = true
   nextPollAt = 0
@@ -2086,7 +2363,7 @@ function fallbackTariff() {
 }
 
 function ensureTariff(force) {
-  if (!tariffMode || !isDeepseekSource() || tariffLoading) return
+  if (!(tariffT > 0) || !isDeepseekSource() || tariffLoading) return
   if (!force && tariff && tariffRemainSec() > 0) return
   tariffLoading = true
   fetch(PREFIX + '/tariff.json', { credentials: 'same-origin', cache: 'no-store' })
@@ -2106,8 +2383,9 @@ function ensureTariff(force) {
 
 function toggleTariff() {
   if (!isDeepseekSource()) return
-  tariffMode = !tariffMode
-  if (tariffMode) ensureTariff(true)
+  // 只显示 1 秒：到点自动回余额，不需要再点一次。
+  tariffT = 1.0
+  ensureTariff(true)
   wake()
   draw()
 }
@@ -2455,6 +2733,7 @@ function onPointerDown(e) {
       e.preventDefault(); e.stopPropagation()
       heldBowl = hitBowl
       hitBowl.dragging = true
+      hitBowl.homing = false   // 玩家一旦拿起锅，就不再自动追着头走（可以随手丢掉）
       hitBowl.locked = false
       hitBowl.lockT = 0
       hitBowl.sucking = false
@@ -2728,6 +3007,7 @@ function setTheme(t) {
 
 function setSoundOn(on) {
   state.soundOn = !!on
+  if (!state.soundOn) stopAllCues()
   // 打开声音时若音量还是 0，恢复到一个能听见的默认值，否则「开启」等于没开
   if (state.soundOn && !(state.volume > 0)) {
     state.volume = 80
@@ -3087,18 +3367,21 @@ function mainMenu() {
 
 // 声音菜单：保留旧版的「全部音量」，另外每个音效都能单独调音量 / 换自定义音频。
 function soundMenu() {
+  var off = !state.soundOn
   var items = [
-    { label: (state.soundOn ? '✓ ' : '　') + '开启声音', run: function () { setSoundOn(!state.soundOn) } },
+    { label: (state.soundOn ? '✓ ' : '　') + '开启音效', run: function () { setSoundOn(!state.soundOn) } },
     { sep: true },
-    { label: '全部音效音量', header: true },
   ]
+  if (off) items.push({ label: '音效已关闭，先勾选「开启音效」才能调整下面的选项', disabled: true })
+  items.push({ label: '全部音效音量', header: true })
   VOLUME_STEPS.forEach(function (v) {
     items.push({
       label: (allCuesAt(v) ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
+      disabled: off,
       run: function () { setVolume(v) },
     })
   })
-  items.push({ label: '自定义音量…', run: function () { askVolume() } })
+  items.push({ label: '自定义音量…', disabled: off, run: function () { askVolume() } })
   items.push({ sep: true })
   items.push({ label: '单独音效（音量 / 自定义）', header: true })
   for (var i = 0; i < CUE_IDS.length; i++) {
@@ -3106,6 +3389,7 @@ function soundMenu() {
       var custom = state.cueCustom[id]
       items.push({
         label: CUE_LABELS[id] + '（' + cueVolume(id) + ' %' + (custom ? ' · 自定义' : '') + '）▸',
+        disabled: off,
         sub: function () { return cueMenu(id) },
       })
     })(CUE_IDS[i])
@@ -3115,6 +3399,7 @@ function soundMenu() {
 }
 
 function cueMenu(id) {
+  var off = !state.soundOn
   var custom = state.cueCustom[id]
   var items = [
     { label: '「' + CUE_LABELS[id] + '」音量', header: true },
@@ -3122,20 +3407,21 @@ function cueMenu(id) {
   VOLUME_STEPS.forEach(function (v) {
     items.push({
       label: (cueVolume(id) === v ? '✓ ' : '　') + (v === 0 ? '0%（静音）' : v + ' %'),
+      disabled: off,
       run: function () { setCueVolume(id, v) },
     })
   })
-  items.push({ label: '自定义音量…', run: function () { askCueVolume(id) } })
+  items.push({ label: '自定义音量…', disabled: off, run: function () { askCueVolume(id) } })
   items.push({ sep: true })
-  items.push({ label: '试听（音量 ' + cueVolume(id) + ' %）', run: function () { previewCue(id) } })
-  items.push({ label: '上传自定义音效…（mp3/wav/ogg/m4a/aac/flac/webm）', run: function () { pickCustomCue(id) } })
+  items.push({ label: '试听（音量 ' + cueVolume(id) + ' %）', disabled: off, run: function () { previewCue(id) } })
+  items.push({ label: '上传自定义音效…（可截取片段）', disabled: off, run: function () { pickCustomCue(id) } })
   items.push({
     label: custom ? '当前：' + custom.name : '当前：出厂音效',
     disabled: true,
   })
   items.push({
     label: '恢复出厂音效',
-    disabled: !custom,
+    disabled: off || !custom,
     run: function () { restoreFactoryCue(id) },
   })
   items.push({ label: '返回', sub: soundMenu })
@@ -4026,6 +4312,23 @@ function injectCss() {
       'font-family:ui-monospace,Consolas,monospace}' +
     '.dshpet-prompt-inp:focus{outline:none;border-color:#4176e6;box-shadow:0 0 0 2px rgba(65,118,230,.18)}' +
     '.dshpet-prompt-suf{color:#6b7ba8;font-weight:700}' +
+    // 音频片段截取
+    '#dshpet-trim{position:fixed;inset:0;z-index:31600;background:rgba(0,0,0,.62);display:flex;' +
+      'align-items:center;justify-content:center}' +
+    '.dshpet-trim-box{width:min(620px,94vw);box-sizing:border-box;background:#fff;color:#203170;' +
+      'border-radius:12px;padding:16px 18px;box-shadow:0 14px 50px rgba(0,0,0,.5);color-scheme:light;' +
+      'font-family:system-ui,"Segoe UI",sans-serif;font-size:13px}' +
+    '.dshpet-trim-title{font-size:15px;font-weight:800;margin-bottom:4px}' +
+    '.dshpet-trim-sub{color:#6b7ba8;line-height:1.5;margin-bottom:10px;word-break:break-all}' +
+    '.dshpet-trim-audio{width:100%;margin:2px 0 12px}' +
+    '.dshpet-trim-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}' +
+    '.dshpet-trim-label{flex:0 0 38px;color:#6b7ba8;font-weight:700}' +
+    '.dshpet-trim-range{flex:1;min-width:0;accent-color:#4176e6}' +
+    '.dshpet-trim-time{flex:0 0 66px;text-align:right;font-family:ui-monospace,Consolas,monospace;' +
+      'font-size:12px;color:#203170}' +
+    '.dshpet-trim-msg{min-height:18px;font-size:12px;margin-bottom:6px;color:#6b7ba8}' +
+    '.dshpet-trim-msg.is-ok{color:#15803d}.dshpet-trim-msg.is-err{color:#b91c1c}' +
+    '.dshpet-trim-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}' +
     // 轻量提示条（音效上传反馈）
     '#dshpet-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:32000;' +
       'display:none;max-width:min(560px,90vw);box-sizing:border-box;padding:9px 14px;border-radius:9px;' +

@@ -110,6 +110,10 @@ function makeCtx(record = true) {
         if (!record) return () => {}
         return (x, y, r) => { ARCS.push({ x: x, y: y, r: r }) }
       }
+      if (k === 'fillRect') {
+        if (!record) return () => {}
+        return function (x, y, w, h) { FILLS.push({ style: this.fillStyle, x: x, y: y, w: w, h: h }) }
+      }
       if (k === 'createLinearGradient' || k === 'createRadialGradient') return () => ({ addColorStop() {} })
       // 掩码：贴近真实立绘的分布 ——
       //   上方 20% 只有「头」（偏右，x 0.56..0.80）
@@ -148,6 +152,7 @@ const AUDIO_PLAYED = []  // 实际被 play() 的音效源（观察音效）
 const AUDIO_VOLUMES = [] // 每次 play() 时的音量（观察独立音量）
 const LOGS = []         // 插件内部 console 输出（调试用）
 const TEXTS = []        // 被 fillText 画出的文字（雷达名牌读数）
+const FILLS = []        // 被 fillRect 画出的矩形（平板背景色）
 const ARCS = []         // 被 arc 画出的圆（雷达方向环）
 let vnow = 0            // 虚拟时钟（毫秒）
 function makeEnv() {
@@ -425,11 +430,14 @@ ok('有「自定义音量…」', !!rowBy(menuRoot, '自定义音量'))
 click(rowBy(menuRoot, '0%（静音）'))
 await flush(6)
 await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
-ok('选 0% 后「开启声音」不再打勾', !rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 开启声音')), rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+ok('选 0% 后「开启音效」不再打勾', !rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 开启音效')), rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+// 关闭后下方档位不可用，必须先重新勾选「开启音效」
+click(rowBy(menuRoot, '开启音效')); await flush(6)
+await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
 click(rowBy(menuRoot, '75 %')); await flush(6)
 await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
 ok('选 75% 后打勾落在 75%', rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 75 %')), rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
-ok('选 75% 后「开启声音」恢复打勾', rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 开启声音')))
+ok('选 75% 后「开启音效」恢复打勾', rowsOf(menuRoot).some((r) => r.textContent.includes('✓ 开启音效')))
 
 console.log('')
 console.log('=== 每个音效独立音量 / 自定义音效 ===')
@@ -454,31 +462,47 @@ click(rowBy(menuRoot, '受击（扣费）')); await flush(6)
 click(rowBy(menuRoot, '75 %')); await flush(6)
 
 console.log('')
+console.log('=== 关闭音效后下方选项不可用 ===')
+await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
+click(rowBy(menuRoot, '开启音效')); await flush(6)
+await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
+const offVolume = rowBy(menuRoot, '75 %')
+ok('关闭后音量档位不可点', !!offVolume && offVolume.style.cursor === 'default' &&
+  String(offVolume.style.opacity) === '.45', offVolume ? offVolume.style.opacity : '(missing)')
+ok('关闭后有提示文案', rowsOf(menuRoot).some((r) => r.textContent.includes('音效已关闭')))
+AUDIO_PLAYED.length = 0
+await openMenu(); click(rowBy(menuRoot, '测试一次扣费')); await advance(0.1)
+ok('关闭音效后扣费不播放受击音', !AUDIO_PLAYED.some((s) => s.includes('hit.mp3')), AUDIO_PLAYED.join(','))
+// 重新开启
+await openMenu(); click(rowBy(menuRoot, '声音')); await flush(6)
+click(rowBy(menuRoot, '开启音效')); await flush(6)
+
+console.log('')
 console.log('=== 平板峰谷彩蛋（DSH 账户余额）===')
-const tp = tabletPoint()
 TEXTS.length = 0
-if (tp) {
-  doc.fire('pointerdown', { button: 0, clientX: tp.x, clientY: tp.y })
-  win.fire('pointerup', { clientX: tp.x, clientY: tp.y })
-  await flush(8)
-  await advance(0.1)
-}
+await oneFrame()
 ok('平板标题已改为「DSH 账户余额」', TEXTS.some((t) => t.text === 'DSH 账户余额'),
   [...new Set(TEXTS.map((t) => t.text))].join(' | '))
-ok('点击平板切换到梁文峰', TEXTS.some((t) => t.text === '梁文峰'),
-  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
-ok('峰谷彩蛋带剩余时长', TEXTS.some((t) => /^距谷时 \d+:\d{2}:\d{2}$/.test(t.text)),
-  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
-// 再点一下切回余额
+const tp = tabletPoint()
 TEXTS.length = 0
+FILLS.length = 0
 if (tp) {
   doc.fire('pointerdown', { button: 0, clientX: tp.x, clientY: tp.y })
   win.fire('pointerup', { clientX: tp.x, clientY: tp.y })
   await flush(8)
   await advance(0.1)
 }
-ok('再点平板切回余额', !TEXTS.some((t) => t.text === '梁文峰') && TEXTS.some((t) => t.text === '12.34'),
+ok('点击平板切换到梁文峰', TEXTS.some((t) => t.text === '梁文峰'),
   [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+ok('峰价为红色背景', FILLS.some((f) => f.style === '#c62828' && f.w > 300 && f.h > 150),
+  FILLS.filter((f) => f.w > 300).map((f) => f.style).join(' | '))
+ok('峰谷彩蛋带剩余时长', TEXTS.some((t) => /^距谷时 \d+:\d{2}:\d{2}$/.test(t.text)),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+// 只显示 1 秒：到点自动回余额，不用再点
+await advance(1.2)
+const tariffTail = TEXTS.slice(-6).map((t) => t.text)
+ok('峰谷彩蛋 1 秒后自动回到余额', !tariffTail.includes('梁文峰') && tariffTail.includes('12.34'),
+  tariffTail.join(' | '))
 
 console.log('')
 console.log('=== 自定义扣费步长 ===')
