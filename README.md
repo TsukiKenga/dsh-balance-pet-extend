@@ -1,6 +1,7 @@
 # DSH余额桌宠 · DSH Balance Pet Enhanced
 >「本项目基于 [VKmich16/VK-1](https://www.github.com/VKmich16/VK-1) 二次开发」
-
+> NPM下载地址：[https://www.npmjs.com/package/dsh-vk1-balance-pet-enhanced](https://www.npmjs.com/package/dsh-vk1-balance-pet-enhanced)
+> NPM版不包含每回合结束音效和默认的喜报配乐，但可以通过自定义补全。
 贴在 **DSH** 页面里的余额桌宠：角色举着一块倾斜的平板，实时显示你的余额。
 
 余额每**下降一个可配置的步长**（默认 **0.01 元**，最小也是 0.01 元，可改成 0.1、0.5、1 元），
