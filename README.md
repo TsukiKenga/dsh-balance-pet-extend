@@ -1,6 +1,8 @@
 # DSH余额桌宠 · DSH Balance Pet Enhanced
 >「本项目基于 [VKmich16/VK-1](https://www.github.com/VKmich16/VK-1) 二次开发」
+>
 >最新版Github Release下载地址：[V1.8.2](https://github.com/TsukiKenga/dsh-balance-pet-extend/releases/tag/V1.8.2)
+>
 > NPM下载地址：[dsh-vk1-balance-pet-enhanced](https://www.npmjs.com/package/dsh-vk1-balance-pet-enhanced)
 >
 > NPM版不包含每回合结束音效和默认的喜报配乐，但可以通过自定义补全。
