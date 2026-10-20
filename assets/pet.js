@@ -354,6 +354,9 @@ var destroyed = false
 // —— 余额 / 动画状态（照搬 PetModel）——
 var realUnits = null      // 最近一次服务器读数（万分之一元）
 var bookedUnits = null    // 动画中的显示值
+// 偶发归零防护：非手动刷新时，连续读到 0 先保留上一次非零显示（宿主侧也会挡一次）
+var lastGoodUnits = null
+var zeroReads = 0
 var pendingUnits = 0      // 还没通过动画扣掉的差额
 var demoRemaining = 0
 var demoOffsetUnits = 0
@@ -2608,6 +2611,22 @@ function pollOnce(snap, force) {
       if (!isFinite(units)) {
         connected = false; previousWasDisconnected = true; lastError = '余额数值异常'; draw(); return
       }
+      // 偶发归零防护：非手动刷新时，第一次 / 第二次读到 0 都先保留上一次非零显示，
+      // 连续三次才当真（宿主侧还会先挡一次）。手动「立即刷新余额」不拦，用户可主动确认归零。
+      if (units === 0 && !j.zeroConfirmed && state.source !== 'deepseek' &&
+          lastGoodUnits !== null && lastGoodUnits > 0 && !force) {
+        zeroReads += 1
+        if (zeroReads < 3) {
+          connected = true
+          lastError = null
+          previousWasDisconnected = false
+          if (!animating) draw()
+          return
+        }
+      } else {
+        zeroReads = 0
+      }
+      if (units > 0) lastGoodUnits = units
       // 断线后的第一次读数直接对齐，不补播积压动画
       applyReading(units, snap || previousWasDisconnected)
       previousWasDisconnected = false
@@ -2668,6 +2687,8 @@ function setSource(id) {
   // 换来源 = 换币种 / 换量纲：动画状态全部清空，下一轮直接对齐，绝不能和旧来源的数字做差
   realUnits = null
   bookedUnits = null
+  lastGoodUnits = null
+  zeroReads = 0
   pendingUnits = 0
   demoRemaining = 0
   demoOffsetUnits = 0

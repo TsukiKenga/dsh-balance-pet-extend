@@ -1600,6 +1600,28 @@ ok('保存后菜单条数更新为 2', !!rowBy(menuRoot, '模型价格表') &&
   rowBy(menuRoot, '模型价格表') ? rowBy(menuRoot, '模型价格表').textContent : '(missing)')
 
 console.log('')
+console.log('=== 偶发归零防护 ===')
+// 先建立一次正常读数
+balanceYuan = 12.34
+await openMenu(); click(rowBy(menuRoot, '立即刷新余额')); await advance(0.6)
+balanceYuan = 0
+// 自动轮询（非手动刷新）读到 0：先保留上一次非零显示
+await advance(31)
+TEXTS.length = 0
+await oneFrame()
+ok('自动轮询读到 0 时不立刻归零', TEXTS.some((t) => t.text === '12.34'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+// 手动刷新：用户主动确认，接受 0
+await openMenu(); click(rowBy(menuRoot, '立即刷新余额')); await advance(0.5)
+TEXTS.length = 0
+await oneFrame()
+ok('手动刷新后接受 0', TEXTS.some((t) => t.text === '0.00'),
+  [...new Set(TEXTS.map((t) => t.text))].join(' | '))
+// 恢复正常余额，别影响关于 / 隐藏恢复等收尾用例
+balanceYuan = 12.34
+await openMenu(); click(rowBy(menuRoot, '立即刷新余额')); await advance(0.6)
+
+console.log('')
 console.log('=== 关于（含上游版本说明）===')
 await openMenu()
 const aboutRow = rowBy(menuRoot, '关于')

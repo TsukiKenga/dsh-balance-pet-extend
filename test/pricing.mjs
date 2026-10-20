@@ -10,6 +10,7 @@
 // ============================================================================
 import { costOfUsage, priceFor, buildCustomPrices } from '../lib/pricing.js'
 import { normalizePriceModels, mergePriceModels, builtinPriceRows } from '../lib/prices.js'
+import { pickBalanceInfo } from '../lib/providers.js'
 
 let pass = 0
 const fails = []
@@ -82,6 +83,23 @@ ok('新条目计为新增', mergedAdd.added === 1 && mergedAdd.updated === 0, JS
 const priceRows = builtinPriceRows()
 ok('内置价目表可列出', priceRows.length >= 2 && priceRows.some((r) => r.name === 'deepseek-flash'),
   priceRows.map((r) => r.name).join(','))
+
+console.log('')
+console.log('=== DeepSeek balance_infos 选择 ===')
+ok('第一条是 0 时选后面的正数',
+  pickBalanceInfo([
+    { currency: 'CNY', total_balance: '0.00' },
+    { currency: 'CNY', total_balance: '4.07' },
+  ]).total_balance === '4.07')
+ok('优先 CNY 正数', pickBalanceInfo([
+  { currency: 'USD', total_balance: '1.00' },
+  { currency: 'CNY', total_balance: '2.00' },
+]).total_balance === '2.00')
+ok('全是 0 时回退到 CNY', pickBalanceInfo([
+  { currency: 'USD', total_balance: '0' },
+  { currency: 'CNY', total_balance: '0' },
+]).currency === 'CNY')
+ok('空数组返回 null', pickBalanceInfo([]) === null)
 
 console.log('')
 console.log('结果: ' + pass + ' 通过 / ' + fails.length + ' 失败')
