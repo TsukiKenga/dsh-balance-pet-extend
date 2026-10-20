@@ -377,6 +377,8 @@ var nextPollAt = 0
 var retryNotBefore = 0
 var backoff = 30
 var generation = 0
+// 切换余额来源时自增：上一来源还在飞的请求必须丢弃，否则会把旧余额写到新来源的平板上
+var sourceGen = 0
 // 断线 → 恢复时的第一次读数直接对齐，不补播断线期间攒下的扣费动画
 var previousWasDisconnected = false
 
@@ -388,6 +390,11 @@ var ledgerCache = null         // 最近一次 /ledger.json
 var ledgerInFlight = false
 var settleOverlay = null       // { root, timer }
 var audioUnlocked = false
+
+// —— 手动模型价格表 ——
+var priceCache = null          // 最近一次 /prices.json
+var priceInFlight = false
+var priceEditor = null         // JSON 编辑弹层
 
 // —— 来源形态：金额类（balance）vs 订阅额度类（quota）——
 var sourceKind = 'balance'
@@ -783,7 +790,7 @@ function newBowl(props) {
     x: 0, y: 0, vx: 0, vy: 0, r: 10,
     bounces: 0, fed: false, fedT: 0,
     iron: false, onHead: false, homing: false, autoEmpty: false,
-    born: 0, restT: 0, grounded: false, amount: 0,
+    born: 0, restT: 0, grounded: false, amount: 0, landSfx: false,
     locked: false, lockT: 0, sucking: false, suckSpeed: 0,
     dragging: false, grabX: 0, grabY: 0, targetX: 0, targetY: 0,
     deform: 0, deformV: 0, shear: 0, shearV: 0,
@@ -1206,8 +1213,11 @@ function updateBowls(dt) {
     if (r.y + r.r > floor) {
       r.y = floor - r.r
       r.grounded = true
-      // 铁锅第一次落到窗口底部：播放「扣头」音效（对调后的 pot_off）
-      if (r.iron && !wasGrounded && Math.abs(r.vy) > 90) playCue('land')
+      // 米饭盆 / 铁锅第一次落到窗口底部：播放落地音（白饭以前是完全静音的）
+      if (!wasGrounded && Math.abs(r.vy) > 90 && (r.iron || !r.landSfx)) {
+        playCue('land')
+        if (!r.iron) r.landSfx = true
+      }
       if (Math.abs(r.vy) > 90 && r.bounces < RICE_MAX_BOUNCES) {
         r.vy = -Math.abs(r.vy) * RICE_RESTITUTION
         r.bounces += 1
@@ -2552,7 +2562,9 @@ function pollOnce(snap, force) {
   if (now < retryNotBefore) return Promise.resolve()
   inFlight = true
   var myGen = generation
-  var url = PREFIX + '/balance.json?source=' + encodeURIComponent(state.source)
+  var mySourceGen = sourceGen
+  var mySource = state.source
+  var url = PREFIX + '/balance.json?source=' + encodeURIComponent(mySource)
   if (force) url += '&refresh=1'
   return fetch(url, { credentials: 'same-origin', cache: 'no-store' })
     .then(function (res) {
@@ -2568,6 +2580,8 @@ function pollOnce(snap, force) {
     })
     .then(function (j) {
       if (myGen !== generation) return // 重新读凭据后旧结果丢弃
+      // 来源已经切走：这份响应属于旧来源，绝不能拿来更新新来源的余额
+      if (mySourceGen !== sourceGen || mySource !== state.source) return
       if (!j || !j.ok) {
         connected = false
         previousWasDisconnected = true
@@ -2601,6 +2615,7 @@ function pollOnce(snap, force) {
     })
     .catch(function (err) {
       if (myGen !== generation) return
+      if (mySourceGen !== sourceGen || mySource !== state.source) return
       connected = false
       previousWasDisconnected = true
       lastError = String((err && err.message) || err)
@@ -2608,6 +2623,8 @@ function pollOnce(snap, force) {
     })
     .then(function () {
       inFlight = false
+      // 来源在请求期间切走了：立刻让下一轮去取新来源，别等旧来源的 backoff
+      if (mySourceGen !== sourceGen || mySource !== state.source) { nextPollAt = 0; return }
       if (myGen !== generation) return
       backoff = state.pollSeconds
       retryNotBefore = 0
@@ -2637,12 +2654,15 @@ function pollLoop() {
 function applySourceMeta() {
   var found = null
   for (var i = 0; i < sources.length; i++) if (sources[i].id === state.source) found = sources[i]
-  sourceLabel = (!found || found.builtin) ? 'DSH 账户余额' : String(found.name || 'DSH 账户余额')
+  // 手动 Key 来源即使暂时从 sources 里缺失，也保住自己的名字，别显示成账户余额
+  if (!found && state.source === 'deepseek_apikey') sourceLabel = 'DeepSeek（手动 Key）'
+  else sourceLabel = (!found || found.builtin) ? 'DSH 账户余额' : String(found.name || 'DSH 账户余额')
 }
 
 function setSource(id) {
   if (!id || id === state.source) return
   state.source = id
+  sourceGen++
   applySourceMeta()
   saveState()
   // 换来源 = 换币种 / 换量纲：动画状态全部清空，下一轮直接对齐，绝不能和旧来源的数字做差
@@ -3131,6 +3151,7 @@ function onPointerDown(e) {
       hitBowl.lockT = 0
       hitBowl.sucking = false
       hitBowl.restT = 0
+      hitBowl.landSfx = false
       hitBowl.grabX = e.clientX - hitBowl.x
       hitBowl.grabY = e.clientY - hitBowl.y
       // 拖动目标点先对齐当前位置，避免刚拿起就被弹簧拽一下
@@ -3252,9 +3273,9 @@ function onContextMenu(e) {
   menuPos.x = e.clientX
   menuPos.y = e.clientY
   showMenu(e.clientX, e.clientY)
-  // 菜单标签（累计计费是否勾选、结束计费的合计金额）依赖账本。先按缓存渲染保证响应快，
-  // 账本回来时若菜单还开着就重渲染一次 —— 否则「刚结算完再打开」会看到过期的禁用态。
-  readLedger().then(function () {
+  // 菜单标签（累计计费是否勾选、结束计费的合计金额、价格表条数）依赖账本 / 价格表。
+  // 先按缓存渲染保证响应快；数据回来时若菜单还开着就重渲染一次。
+  Promise.all([readLedger(), readPrices()]).then(function () {
     if (menuOpen()) showMenu(menuPos.x, menuPos.y)
   })
 }
@@ -3763,6 +3784,9 @@ function mainMenu() {
           if (p && p.ok) showSettlement(p)
         })
       } },
+    { label: '模型价格表' +
+        (priceCache && priceCache.models ? '（' + priceCache.models.length + ' 条手动）' : '') + ' ▸',
+      sub: priceMenu },
     { label: (holidayStatus && holidayStatus.level !== 'ok' ? '⚠ ' : '') + '节假日清单…',
       run: function () { showHolidayPanel() } },
     { label: '扣费步长（每 ' + stepLabel() + ' 元提示一次）▸', sub: function () {
@@ -4635,6 +4659,196 @@ function ledgerLoop() {
   setTimeout(ledgerLoop, LEDGER_POLL_MS)
 }
 
+// ============================================================================
+// 手动模型价格表（未知模型 / 已有模型都能改）
+// ============================================================================
+function priceShort(p) {
+  p = p || {}
+  var usd = String(p.cur || 'CNY').toUpperCase() === 'USD'
+  var cur = usd ? '$' : '¥'
+  var num = function (x) { var n = Number(x); return isFinite(n) ? String(Math.round(n * 1000) / 1000) : '0' }
+  return cur + num(p.hit) + ' / ' + cur + num(p.miss) + ' / ' + cur + num(p.out)
+}
+
+function readPrices() {
+  if (priceInFlight) return Promise.resolve(priceCache)
+  priceInFlight = true
+  return fetch(PREFIX + '/prices.json', { credentials: 'same-origin', cache: 'no-store' })
+    .then(function (r) { return r.json() })
+    .then(function (j) { if (j && j.ok) priceCache = j; return priceCache })
+    .catch(function () { return priceCache })
+    .then(function (v) { priceInFlight = false; return v })
+}
+
+function postPrices(action, models) {
+  return fetch(PREFIX + '/prices.json', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: action, models: models || [] }),
+  })
+    .then(function (r) { return r.json() })
+    .then(function (j) { if (j && j.ok) priceCache = j; return j })
+    .catch(function () { return { ok: false, error: '请求失败' } })
+}
+
+function priceModelsFromText(text) {
+  var j
+  try { j = JSON.parse(String(text || '')) } catch (err) { return { error: '不是合法 JSON' } }
+  var models = Array.isArray(j) ? j : (j && Array.isArray(j.models) ? j.models : null)
+  if (!models) return { error: 'JSON 里需要 models 数组（或直接是数组）' }
+  return { models: models }
+}
+
+function pickPriceFile() {
+  try {
+    var inp = document.createElement('input')
+    inp.type = 'file'
+    inp.accept = '.json,application/json'
+    inp.style.display = 'none'
+    inp.addEventListener('change', function () {
+      var f = inp.files && inp.files[0]
+      if (f) {
+        var fr = new FileReader()
+        fr.onload = function () {
+          var r = priceModelsFromText(fr.result)
+          if (r.error) { showToast('导入失败：' + r.error, false); return }
+          postPrices('import', r.models).then(function (j) {
+            if (j && j.ok) {
+              showToast('已导入 ' + j.models.length + ' 条（新增 ' + (j.added || 0) + ' / 更新 ' + (j.updated || 0) + '）', true)
+              wake()
+            } else {
+              showToast('导入失败：' + ((j && j.error) || '未知错误'), false)
+            }
+          })
+        }
+        fr.onerror = function () { showToast('读取文件失败', false) }
+        fr.readAsText(f)
+      }
+      try { if (inp.parentNode) inp.parentNode.removeChild(inp) } catch (err) {}
+    })
+    ;(document.body || document.documentElement).appendChild(inp)
+    inp.click()
+  } catch (err) { showToast('当前环境不能打开文件选择器', false) }
+}
+
+function askClearPrices() {
+  showPrompt({
+    title: '清空手动价格表',
+    label: '输入「清空」确认。只删除手动导入的模型价格；内置价目表和 .dshw-api.json 不受影响。',
+    value: '',
+    onOk: function (v, msg) {
+      if (String(v).trim() !== '清空') {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = '请输入「清空」两个字'
+        return false
+      }
+      postPrices('clear', []).then(function (j) {
+        if (j && j.ok) showToast('已清空手动价格表', true)
+        else showToast('清空失败：' + ((j && j.error) || '未知错误'), false)
+      })
+      return true
+    },
+  })
+}
+
+function closePriceEditor() {
+  var o = priceEditor
+  if (!o) return
+  priceEditor = null
+  try { document.removeEventListener('keydown', o.onKey, true) } catch (err) {}
+  try { if (o.root.parentNode) o.root.parentNode.removeChild(o.root) } catch (err) {}
+}
+
+function showPriceEditor() {
+  closePriceEditor()
+  var root = document.createElement('div')
+  root.id = 'dshpet-price'
+  var box = document.createElement('div')
+  box.className = 'dshpet-price-box'
+  var title = document.createElement('div')
+  title.className = 'dshpet-price-title'
+  title.textContent = '手动模型价格表（JSON）'
+  var hint = document.createElement('div')
+  hint.className = 'dshpet-price-hint'
+  hint.textContent = 'hit = 缓存命中、miss = 输入、out = 输出，单位：元/百万 token；缺省字段按 0。' +
+    ' cur 可为 CNY 或 USD（USD 请填 rate）。保存会覆盖整张手动表；导入文件则按 id / matchIds 合并。'
+  var ta = document.createElement('textarea')
+  ta.className = 'dshpet-price-ta'
+  ta.spellcheck = false
+  var current = (priceCache && priceCache.models) || []
+  ta.value = JSON.stringify({ models: current }, null, 2)
+  var msg = document.createElement('div')
+  msg.className = 'dshpet-hol-msg'
+  var actions = document.createElement('div')
+  actions.className = 'dshpet-hol-actions'
+  var cancel = document.createElement('button')
+  cancel.type = 'button'
+  cancel.className = 'dshpet-hol-btn'
+  cancel.textContent = '取消'
+  var save = document.createElement('button')
+  save.type = 'button'
+  save.className = 'dshpet-hol-btn dshpet-hol-primary'
+  save.textContent = '保存'
+  actions.appendChild(cancel)
+  actions.appendChild(save)
+  box.appendChild(title)
+  box.appendChild(hint)
+  box.appendChild(ta)
+  box.appendChild(msg)
+  box.appendChild(actions)
+  root.appendChild(box)
+  ;(document.body || document.documentElement).appendChild(root)
+
+  save.addEventListener('click', function () {
+    var r = priceModelsFromText(ta.value)
+    if (r.error) {
+      msg.className = 'dshpet-hol-msg is-err'
+      msg.textContent = r.error
+      return
+    }
+    save.disabled = true
+    postPrices('replace', r.models).then(function (j) {
+      save.disabled = false
+      if (j && j.ok) {
+        showToast('已保存 ' + j.models.length + ' 条价格', true)
+        closePriceEditor()
+        wake()
+      } else {
+        msg.className = 'dshpet-hol-msg is-err'
+        msg.textContent = (j && j.error) || '保存失败'
+      }
+    })
+  })
+  cancel.addEventListener('click', closePriceEditor)
+  root.addEventListener('pointerdown', function (ev) { if (ev.target === root) closePriceEditor() })
+  var o = { root: root, onKey: function (ev) { if (ev.key === 'Escape') closePriceEditor() } }
+  document.addEventListener('keydown', o.onKey, true)
+  priceEditor = o
+  try { ta.focus() } catch (err) {}
+}
+
+function priceMenu() {
+  var models = (priceCache && priceCache.models) || []
+  var rows = []
+  rows.push({ label: models.length ? ('手动价格表：' + models.length + ' 条') : '手动价格表：还没有条目', disabled: true })
+  var show = models.slice(0, 6)
+  for (var i = 0; i < show.length; i++) {
+    var m = show[i]
+    rows.push({ label: '　· ' + (m.name || m.id) + '　' + priceShort(m.price), disabled: true })
+  }
+  if (models.length > show.length) rows.push({ label: '　…还有 ' + (models.length - show.length) + ' 条', disabled: true })
+  rows.push({ sep: true })
+  rows.push({ label: '导入价格表（JSON 文件）…', run: pickPriceFile })
+  rows.push({ label: '编辑当前价格表（JSON）…', run: showPriceEditor })
+  rows.push({ label: '清空手动价格表…', run: askClearPrices })
+  rows.push({ sep: true })
+  rows.push({ label: '未收录模型按 matchIds 匹配；同 id 再导入即更新', disabled: true })
+  rows.push({ label: '保存后从下一轮开始按新价格计费', disabled: true })
+  rows.push({ label: '返回', sub: mainMenu })
+  return rows
+}
+
 // —— 结算页 ——
 function fmtTime(ms) {
   try {
@@ -4642,6 +4856,12 @@ function fmtTime(ms) {
     var p = function (n) { return (n < 10 ? '0' : '') + n }
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
   } catch (err) { return '--' }
+}
+
+// token 数：千分位，方便一眼看出量级（未收录模型靠它留痕）
+function fmtTokens(n) {
+  var v = Math.max(0, Math.round(Number(n) || 0))
+  return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 }
 
 function closeSettlement() {
@@ -4714,7 +4934,18 @@ function showSettlement(p) {
     bodyEl.appendChild(none)
   }
   for (var i = 0; i < models.length; i++) {
-    bodyEl.appendChild(certRow(models[i].name, '¥' + moneyString(toUnits(models[i].amount))))
+    var m = models[i]
+    var label = m.name
+    var right = '¥' + moneyString(toUnits(m.amount))
+    // 未收录 / 未知模型：价格表里没有，按默认价计费；把实际 token 用量标出来
+    if (m.unknown) {
+      label = m.name + '（未收录）'
+      right += ' · ' + fmtTokens(m.tokens) + ' tok'
+    }
+    bodyEl.appendChild(certRow(label, right))
+  }
+  if (p.unknownTokens > 0) {
+    bodyEl.appendChild(certRow('未收录模型合计', fmtTokens(p.unknownTokens) + ' tok'))
   }
   var tot = certRow('合计', '¥' + moneyString(toUnits(p.total)))
   tot.className = 'dshpet-cert-total'
@@ -4879,6 +5110,19 @@ function injectCss() {
       'font-family:ui-monospace,Consolas,monospace}' +
     '.dshpet-prompt-inp:focus{outline:none;border-color:#4176e6;box-shadow:0 0 0 2px rgba(65,118,230,.18)}' +
     '.dshpet-prompt-suf{color:#6b7ba8;font-weight:700}' +
+    // 手动模型价格表编辑器
+    '#dshpet-price{position:fixed;inset:0;z-index:31600;background:rgba(0,0,0,.62);display:flex;' +
+      'align-items:center;justify-content:center}' +
+    '.dshpet-price-box{width:min(720px,94vw);max-height:88vh;display:flex;flex-direction:column;' +
+      'box-sizing:border-box;background:#fff;color:#203170;border-radius:12px;padding:16px 18px;' +
+      'box-shadow:0 14px 50px rgba(0,0,0,.5);color-scheme:light;' +
+      'font-family:system-ui,"Segoe UI",sans-serif;font-size:13px}' +
+    '.dshpet-price-title{font-size:15px;font-weight:800;margin-bottom:4px}' +
+    '.dshpet-price-hint{color:#6b7ba8;line-height:1.5;margin-bottom:8px}' +
+    '.dshpet-price-ta{flex:1;min-height:260px;width:100%;box-sizing:border-box;resize:vertical;' +
+      'border-radius:8px;border:1px solid rgba(32,49,112,.3);padding:10px;font-size:12px;' +
+      'font-family:ui-monospace,Consolas,monospace;color:#203170;line-height:1.45;margin-bottom:8px}' +
+    '.dshpet-price-ta:focus{outline:none;border-color:#4176e6;box-shadow:0 0 0 2px rgba(65,118,230,.18)}' +
     // 音频片段截取
     '#dshpet-trim{position:fixed;inset:0;z-index:31600;background:rgba(0,0,0,.62);display:flex;' +
       'align-items:center;justify-content:center}' +

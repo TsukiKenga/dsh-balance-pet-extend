@@ -48,7 +48,8 @@ Swift + AppKit）改写成的 **DSH Web 插件**。五个角色，余额显示�
 
 装好后重启 DSH + 刷新页面，**左下角**会出现桌宠；右键它就能看到菜单。
 
-> 余额来源只会列出**你已经在 DSH 里配了 API key 的厂商**（没配的直接隐藏）。
+> 余额来源会列出内置「DSH 账户余额」（账号登录态）；配了 `DEEPSEEK_API_KEY` 时还会多出
+> 「DeepSeek（手动 Key）」独立来源；其它厂商只列**已经配了 API key 的**（没配的直接隐藏）。
 > 想确认哪些通、哪些不通：右键 →「网络自检…」。
 
 ### 方式二：手动装
@@ -119,7 +120,7 @@ dsh plugin --profile <profile> add link:<本目录的绝对路径>
 | 投喂米饭盆 | 把盆拖到她身上 | `feed.mp3` |
 | 铁锅扣头 | 把空锅第二次拖回她身上 / 扣到头上 | `pot_off.mp3`（已与「取下」对调） |
 | 取下铁锅 | 双击头部取锅 | `pot_land.mp3`（已与「扣头」对调） |
-| 铁锅落地 | 空锅落到窗口底部 | 复用「铁锅扣头」的 `pot_off.mp3` |
+| 铁锅落地 / 白饭落地 | 空锅或米饭盆落到窗口底部 | 复用「铁锅扣头」的 `pot_off.mp3`；白饭每个盆只响一次 |
 | 回合结束喜报 | 每轮消耗气泡 | `congrats-turn.mp3` |
 | 结算证书 | 打开结算页 | `congrats-settle.mp3`（不预加载） |
 
@@ -225,21 +226,32 @@ dsh plugin --profile <profile> add link:<本目录的绝对路径>
 
 | 来源 | 取法 |
 | --- | --- |
-| **DSH 账户余额** | 凭据里有 `DEEPSEEK_API_KEY` → `https://api.deepseek.com/user/balance`；否则走 DSH 账号登录态（`ctx.get('deepseekAccount')` 可选服务，**不写进 inject**，否则老宿主上整个插件不会 apply） |
+| **DSH 账户余额** | 只走 DSH 账号登录态（`ctx.get('deepseekAccount')` 可选服务，**不写进 inject**，否则老宿主上整个插件不会 apply）。**不会**再回退到 `DEEPSEEK_API_KEY` |
+| **DeepSeek（手动 Key）** | 始终列在菜单里；配了 `DEEPSEEK_API_KEY`（或 `.dshw-api.json` 里 `id: "deepseek_apikey"` 的 `keyRef`）时正常查询，没配时名字带「未配置」；只查 `https://api.deepseek.com/user/balance`，与账号余额**分开缓存、分开显示** |
 | **其它厂商** | 见下表，**自动发现**：只要有对应凭据就出现在菜单里，不需要手工注册 |
 
-覆盖 **12 家「用 API key 就能自动查到」的厂商**：
+这样两种余额不会互相顶掉：账号余额始终显示账号的，手动 key 始终显示 key 的；
+网络自检也会分别列出两条结果。
+
+覆盖 **12 家「用 API key 就能自动查到」的厂商**（外加手动 DeepSeek Key）：
 
 | 类型 | 厂商 | 显示 |
 | --- | --- | --- |
-| **金额**（6） | DeepSeek、OpenRouter、Kimi/Moonshot（CN）、Kimi/Moonshot（国际）、阶跃星辰 StepFun、Novita | `¥12.34` / `$23.50` |
+| **账号余额** | DSH 账户（DeepSeek 登录态） | `¥12.34` |
+| **手动 Key** | DeepSeek（`DEEPSEEK_API_KEY`） | `¥12.34` |
+| **金额**（5，另加手动 DeepSeek） | OpenRouter、Kimi/Moonshot（CN）、Kimi/Moonshot（国际）、阶跃星辰 StepFun、Novita | `¥12.34` / `$23.50` |
 | **订阅额度**（6） | 智谱 GLM Coding Plan（国内/国际）、Kimi Coding、MiniMax Coding（国内/国际）、OpenCode Go | `剩余 63%` |
 
 - **只列已配凭据的**：宿主按**候选凭据名依次探测**（DSH 官方环境变量名优先，whale 的旧名兜底），
   **没配的直接隐藏**（而不是列一堆点下去只会报「未配置」的条目）。
+  两个例外：内置「DSH 账户余额」始终存在；「DeepSeek（手动 Key）」也**始终列出**
+  （没配时名字带「未配置」）—— 凭据探测有 30 秒缓存，探测偶发失败时如果把它从列表里拿掉，
+  前端会以为来源没了而回退到账户余额，用户就会看到「手动 Key 的余额突然和账户余额一样」。
+  切换来源时，上一来源还在飞的请求也会被丢弃，不会把旧余额写到新来源的平板上。
   > 为什么是一串候选名：DSH 自己的厂商目录用的名字与 whale 不一致
   > （DSH `KIMI_API_KEY` vs whale `KIMI_CODING_KEY`、DSH `ZAI_CODING_CN_API_KEY` vs whale `ZHIPU_API_KEY` …），
   > 只认一个就会把**已经配好的**显示成未配。每个来源认**各自独立**的凭据，避免两家都「声称已配」而其中一家必然 401。
+
 - **额度类语义统一**：各家接口给的百分比含义不同（有的报「已用 %」、有的报「剩余 %」）。
   模板里用 `sem: 'used' | 'remain'` 显式标注，宿主**统一换算成「剩余 %」**再显示 ——
   否则「37%」到底是用掉还是剩下就说不清了。
@@ -321,7 +333,7 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
   时长 0.9 秒、震动幅度取扣费的 0.45 倍 —— 庆祝语气，不是挨打）
 - 播放 `assets/congrats-turn.mp3`
 
-气泡停留 6 秒后淡出。**子代理回合不计**，消耗为 0 的回合不弹也不记账。
+气泡停留 6 秒后淡出。**子代理回合不计**；消耗与 token 都为 0 的回合不弹也不记账。
 
 ## 累计计费与结算
 
@@ -330,6 +342,8 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
 - 默认**开启**，且**只要没在菜单里关掉，每次启动 DSH 都自动开始计费**
 - 累计区间 = 上一次「结束计费」到这一次（起点落盘，跨重启保留）
 - 菜单里「结束计费并结算（¥1.50）」实时显示当前累计；无消耗时该行禁用
+- 账本同时记录**每个模型的 token 数**（`modelTokens`）与**未收录 / 未知模型的 token**
+  （`unknownTokens` + `unknownModels`）；模型名为空按 `未知` 记录
 
 点它进入**全屏结算页**：以 `assets/certificate.png`（1671×941 的「喜报」模板）为底，
 正文打在**中部黄色区域**（实测标定 `x 352–1330, y 205–772`，避开顶部「喜 报」横幅与左右红幕布）：
@@ -338,11 +352,17 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
 恭喜您在 2026-10-02 09:00 至 2026-10-02 21:30 中共消耗了：
   deepseek-flash                          ¥1.23
   step-3.5-flash                          ¥0.27
+  mystery-model-x（未收录）      ¥0.08 · 8,192 tok
+  未收录模型合计                          8,192 tok
   ─────────────────────────────────────────────
-  合计                                    ¥1.50
+  合计                                    ¥1.58
                                     Deepseek Harness
                                         2026-10-02
 ```
+
+**未收录 / 未知模型**（内置价目表与自定义单价都没匹配上的模型）不会丢账：
+仍按 `_default` 默认价计入金额，并在证书里单独标「（未收录）」+ 实际 token 用量；
+末尾还有一行「未收录模型合计」。这样即使模型不在价目表里，也能看到它到底用了多少 token。
 
 落款贴右下角（**不要求落在黄区内**）。标题过长会自动缩字号以放进黄区宽度。
 进入时播放 `assets/congrats-settle.mp3`（**13.5 MB，绝不预加载**，只在结算页真的打开时才拉取）。
@@ -356,6 +376,40 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
 | 什么都不做 | **15 秒后自动关闭** |
 
 结算页会**挡住下层 DSH 的点击**（这正是必须有自动关闭与 `ESC` 的原因）。
+
+## 手动模型价格表
+
+价目表里没有的模型（未知模型 / 无法查余额的厂商），或想覆盖已有模型的单价：
+右键「**模型价格表**」：
+
+- **导入价格表（JSON 文件）…**：按 `id` / `matchIds` **合并**。同一模型再导入就是**更新**，
+  不会出现两条；响应里会显示「新增 N / 更新 M」。
+- **编辑当前价格表（JSON）…**：直接改整张手动表并保存（覆盖手动表）。
+- **清空手动价格表…**：只清手动条目，内置价目表和 `.dshw-api.json` 不受影响。
+- 手动表**优先于** `.dshw-api.json` 与内置价目表；同一个 `matchIds` 键时手动表先命中。
+- 保存后从**下一轮**开始按新价格计费；已经记进账本的历史金额不回溯。
+- 落盘在 `$DSH_HOME/.dshpet-prices.json`，跨重启保留。
+
+格式与 `.dshw-api.json` 的 `models[].price` 兼容（单位：**元 / 百万 token**）：
+
+```json
+{
+  "models": [
+    {
+      "id": "mystery-model-x",
+      "name": "Mystery Model X",
+      "matchIds": ["mystery-model-x", "mystery-x"],
+      "price": { "hit": 0.2, "miss": 1.2, "out": 6, "cur": "CNY" }
+    }
+  ]
+}
+```
+
+- `hit` = 缓存命中、`miss` = 输入、`out` = 输出；缺省字段按 0。
+- `cur` 可为 `CNY` 或 `USD`；USD 再填 `rate`，按该汇率折算成元记账。
+- `matchIds` 是**包含匹配**（模型名包含任一键即命中，最长键优先）；也可以只写 `id` / `name`，
+  默认用 `id` 当唯一匹配键。
+- 导入的条目会进入 `buildCustomPrices`，所以「未收录」会变成「已知」，结算页不再标未收录。
 
 ## 计价口径
 
@@ -524,11 +578,13 @@ $env:NODE_USE_ENV_PROXY = "1"                  # 关键：不开这个，fetch �
 ## 测试
 
 ```powershell
-node test/smoke.mjs      # 或 npm test
+npm test                  # 前端冒烟 + 宿主计价
+node test/smoke.mjs       # 只跑前端
+node test/pricing.mjs     # 只跑计价（已知 / 未收录 / 自定义单价）
 ```
 
 `test/smoke.mjs` 在**最小 DOM / Canvas / 虚拟时钟**里真跑 `assets/pet.js`，然后通过右键菜单、
-点击与弹层去验证行为 —— 不需要启动 DSH，也不需要浏览器。当前 **207 项**，覆盖：
+点击与弹层去验证行为 —— 不需要启动 DSH，也不需要浏览器。当前 **221 项**，覆盖：
 
 - 菜单结构、子菜单展开、分隔线与分组标题
 - 尺寸档位（杯命名 / px / cm 估算）、自定义尺寸的校验与生效
@@ -544,6 +600,10 @@ node test/smoke.mjs      # 或 npm test
 - **拖盆流体形变**：拖动时碗跟手，出现横向拉伸 + 竖向压扁 + 下半部分剪切，停手后形变回正
 - **拖盆流体强度**：默认 1.6×、五档预设、自定义 2× 生效、3× 被拒绝、关闭后拖动无形变
 - **测试充值盆数**：「掉 1 / 3 / 10 盆饭」分别真的生成 1 / 3 / 10 个米饭盆
+- **未收录模型 token**：结算页给未收录模型标「（未收录）」+ 千分位 token，并显示未收录合计
+- **模型价格表**：菜单条数、编辑 JSON 保存（replace）、保存后条数更新；宿主侧另有
+  校验 / 合并 / 内置表测试（含同 id 覆盖、同 matchId 更新、USD 汇率）
+- **白饭落地音效**：米饭盆落到窗口底部会播放铁盆落地音
 - **火控雷达**：开启后自动拾取缩短（落地满 3 秒），关闭后恢复 10 秒流程；名牌读数与方向环
 - 表情系统：四张全部加载、扣费切「紧张」、保持 1 秒后回「常态」、
   切到没有立绘的角色时退回单图、**零余额切冷脸**
@@ -552,8 +612,10 @@ node test/smoke.mjs      # 或 npm test
 - **自定义演示次数 / 测试充值金额**的校验与生效
 - 关于 / 许可证 / 隐藏与恢复
 
-> 宿主侧（路由、余额来源、许可证白名单、信任栅栏）暂时没有自动化测试，
-> 改动后请手动验证：启动 DSH → 右键「网络自检…」确认来源都能取到余额。
+> 宿主侧（路由、余额来源探测、许可证白名单、信任栅栏）暂时没有自动化测试；
+> 计价纯函数有 `test/pricing.mjs` 覆盖已知 / 未收录 / 自定义单价。
+> 改动余额来源后请手动验证：启动 DSH → 右键「网络自检…」确认「DSH 账户余额」与
+> 「DeepSeek（手动 Key）」分别取到各自的余额。
 > 若改动了包名或目录名，务必核对 **`package.json` 的 `name` 与 `cordis.patch.yml` 的 `name` 一致**
 > —— 不一致时插件会静默不加载，只在启动日志留一行 `failed to import`。
 > 若用 `link:` 安装，**不要**对该 profile 执行移除操作来测试发布包：pnpm 可能顺着软链清空源目录。
@@ -568,6 +630,7 @@ node test/smoke.mjs      # 或 npm test
 | `/dsh-pet/balance.json?source=<id>` | 指定来源的余额或额度（`?refresh=1` 强制刷新，绕过 25 秒缓存） |
 | `/dsh-pet/turn.json` | 最近一轮消耗（`seq` 单调递增，前端据此判断「有新回合」） |
 | `/dsh-pet/ledger.json` | 累计账本。`GET` 读；`POST {"action":"settle"\|"enable"\|"disable"}` |
+| `/dsh-pet/prices.json` | 手动模型价格表。`GET` 读；`POST {"action":"import"\|"replace"\|"clear","models":[...]}` |
 | `/dsh-pet/holidays.json` | 节假日清单。`GET` 读（含过期状态）；`POST {"action":"import"\|"reset", holidays?\|url?}` |
 | `/dsh-pet/sessions.json` | 诊断：观察到的会话字段与子代理判定 |
 | `/dsh-pet/certificate.png` | 结算页底图 |
@@ -583,8 +646,8 @@ node test/smoke.mjs      # 或 npm test
 | `/dsh-pet/tariff.json` | 峰谷时段：`peak/label/nextLabel/nextAt/remainSec/beijing` |
 | `/dsh-pet/hit.mp3` | 扣费音效 |
 
-账本落在 `$DSH_HOME/.dshpet-ledger.json`、节假日清单落在 `$DSH_HOME/.dshpet-holidays.json`
-（均跨重启保留）。
+账本落在 `$DSH_HOME/.dshpet-ledger.json`、节假日清单落在 `$DSH_HOME/.dshpet-holidays.json`、
+手动价格表落在 `$DSH_HOME/.dshpet-prices.json`（均跨重启保留）。
 
 ## 与原版的差异（有意为之）
 
@@ -720,26 +783,26 @@ v1.8.0 把 Windows 版里**网页能做的**玩法补齐了（版本号固定在
 [`licenses/VK-1-LICENSE.txt`](licenses/VK-1-LICENSE.txt)（© 2026 VKmich16，逐字节复制、SHA-256 已核对）。
 MIT 要求再分发时保留版权与许可声明，**这个文件不要删**。
 
-### 需先确认或替换
+### 立绘与模板（可分发，需注明来源）
 
 | 文件 | 说明 |
 | --- | --- |
-| `assets/sprites/*.png`（5 张角色立绘） | 来自 Mac 分支 [DSH-DaFeiYu-Desktop-Pet](https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet)（fork 自 VK-1）的 `Resources/`，与这一版**逐字节相同**。该分支的 `Resources/README.md` 明确写着「不另行授予上游代码、素材或衍生图片的许可」，而且四张立绘是在 Windows 原图（1024×1024）基础上 **AI 补全**出来的 1536×1024 版本 —— 原文也说明「含轻微生成重绘，不能视作原图逐像素不变的扩边」 |
-| `assets/certificate.png` | 「喜报」庆祝模板底图，来源不明 |
+| `assets/sprites/*.png`（5 张角色立绘） | 来自 Mac 分支 [DSH-DaFeiYu-Desktop-Pet](https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet)（fork 自 VK-1）的 `Resources/`，与这一版**逐字节相同**；四张立绘是在 Windows 原图（1024×1024）基础上 **AI 补全**出来的 1536×1024 版本。**可随包分发，但必须注明来源**（见下方出处与 `THIRD-PARTY-NOTICES.txt`） |
+| `assets/certificate.png` | 「喜报」庆祝模板底图，**AI 生成图片，无版权**，可随包分发 |
 
-> ⚠️ **VK-1 的 MIT 不覆盖 Mac 分支的目录** —— VK-1 的 README 里写明那一支
-> 「许可以其独立说明为准」。所以 `rice.png` / `iron_bowl.png` / 音效 / 表情是 MIT，
-> 但四张角色立绘不是。**两者不要混为一谈。**
+> 出处注明：角色立绘来自 [DSH-DaFeiYu-Desktop-Pet](https://github.com/Andromedahk/DSH-DaFeiYu-Desktop-Pet)
+> （Andromedahk，fork 自 [VK-1](https://github.com/VKmich16/VK-1)）；本插件在其基础上做 1536×1024 适配。
+> VK-1 的 MIT 直接覆盖 `rice.png` / `iron_bowl.png` / 音效 / 表情；Mac 分支的立绘按「注明来源即可分发」处理。
 
-### 不可再分发
+### npm 包不包含的音效（不可再分发）
 
 | 文件 | 来源 | 说明 |
 | --- | --- | --- |
 | `assets/congrats-turn.mp3` | vjshi 音效库（[detail/59738](https://www.vjshi.com/sound-effects/detail/59738)） | 商业素材站，按其条款授权给使用者，不可再分发 |
-| `assets/congrats-settle.mp3` | *The Magnificent Seven*（Elmer Bernstein，ID3 标签确认），经 [CefDetector](https://github.com/ShirasawaSama/CefDetector) 取得 | ⚠ **有版权的电影配乐**，仅供本地私人使用；打包发布时建议排除（13.5 MB） |
+| `assets/congrats-settle.mp3` | *The Magnificent Seven*（Elmer Bernstein，ID3 标签确认），经 [CefDetector](https://github.com/ShirasawaSama/CefDetector) 取得 | ⚠ **有版权的电影配乐**，仅供本地私人使用；npm 包已按 `files` 白名单排除（13.5 MB） |
 
-> 代码按 MIT；上表「需先确认或替换」与「不可再分发」的素材**不在本插件的 MIT 覆盖范围内**，
-> 按 as-is 随插件分发，仅用于本地运行本插件，不授予再许可。
+> 代码按 MIT；「不可再分发」的两个 mp3 不在本插件的 MIT 覆盖范围内。
+> npm 包排除了它们，两个音效槽默认静音；用户可在「声音」里上传自定义音频。
 > 逐项登记见 [`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt)。
 
 ---

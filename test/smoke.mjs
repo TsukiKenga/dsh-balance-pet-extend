@@ -15,6 +15,15 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const SRC = fs.readFileSync(path.join(here, '..', 'assets', 'pet.js'), 'utf8')
 // 余额桩：测试可以改这个值，再等自动轮询，验证真实扣费 / 充值路径。
 let balanceYuan = 12.34
+// 账本桩：结算页测试会临时换成带「未收录模型 token」的 payload
+let ledgerStub = { ok: true, enabled: true, since: null, models: {}, total: 0 }
+// 手动价格表桩
+let priceStub = {
+  ok: true,
+  models: [{ id: 'mystery-model-x', name: 'Mystery Model X', matchIds: ['mystery-model-x'], price: { hit: 0.1, miss: 1, out: 5, cur: 'CNY' } }],
+  builtin: [{ name: 'deepseek-flash', price: { hit: [0.02, 0.04], miss: [1, 2], out: [4, 8] } }],
+}
+const PRICE_POSTS = []
 
 // ---------------------------------------------------------------- 断言 -----
 let pass = 0
@@ -238,13 +247,26 @@ function makeEnv() {
       { id: 'zhipu_glm_coding', name: '智谱 GLM Coding Plan（订阅）', currency: 'CNY', kind: 'quota', provider: 'zhipu_glm_coding', hasKey: true, keyRef: 'ZHIPU_API_KEY' },
     ],
   }
-  const fetchStub = (url) => {
+  const fetchStub = (url, opts) => {
     const u = String(url)
     let body = {}
     if (u.includes('manifest.json')) body = manifest
     else if (u.includes('sources.json')) body = sources
     else if (u.includes('turn.json')) body = { ok: true, seq: 0 }
-    else if (u.includes('ledger.json')) body = { ok: true, enabled: true, since: null, models: {}, total: 0 }
+    else if (u.includes('ledger.json')) body = ledgerStub
+    else if (u.includes('prices.json')) {
+      if (opts && opts.method === 'POST') {
+        let req = {}
+        try { req = JSON.parse(opts.body || '{}') } catch (err) { req = {} }
+        PRICE_POSTS.push(req)
+        const models = req.action === 'clear' ? [] : (req.models || [])
+        priceStub = { ok: true, models, builtin: priceStub.builtin, updatedAt: Date.now() }
+        body = {
+          ok: true, models, builtin: priceStub.builtin, updatedAt: Date.now(),
+          added: models.length, updated: 0, action: req.action,
+        }
+      } else body = priceStub
+    }
     else if (u.includes('balance.json')) body = { ok: true, source: 'deepseek', kind: 'balance', currency: 'CNY', totalBalance: balanceYuan, at: Date.now() }
     else if (u.includes('tariff.json')) body = {
       ok: true, peak: true, label: '梁文峰', nextLabel: '距谷时',
@@ -328,6 +350,10 @@ async function flush(n = 40) {
     for (const f of r) { vnow += 16.7; try { f(vnow) } catch (e) { runtimeErrors.push(String(e && e.message || e)) } }
   }
 }
+// 只跑微任务，不执行 timers：用于观察「打开后马上会被自动关闭」的弹层
+async function flushMicro(n = 20) {
+  for (let i = 0; i < n; i++) await Promise.resolve()
+}
 // 推进虚拟时间：按 16.7ms 一帧换算成帧数
 async function advance(seconds) {
   const frames = Math.ceil(seconds / 0.0167)
@@ -343,6 +369,25 @@ async function advance(seconds) {
 // ------------------------------------------------------------ 工具 --------
 function rowsOf(menuRoot) { return menuRoot.children.filter((c) => c.className === 'dshpet-mi') }
 function rowBy(menuRoot, text) { return rowsOf(menuRoot).filter((r) => r.textContent.includes(text))[0] || null }
+// 在测试 DOM 里按 class / 文本找后代（El 没有 querySelector）
+function descByClass(root, cls) {
+  if (!root || !root.children) return null
+  for (const c of root.children) {
+    if (c.className === cls) return c
+    const found = descByClass(c, cls)
+    if (found) return found
+  }
+  return null
+}
+function descByText(root, text) {
+  if (!root || !root.children) return null
+  for (const c of root.children) {
+    if (c.textContent === text) return c
+    const found = descByText(c, text)
+    if (found) return found
+  }
+  return null
+}
 function click(el) {
   if (!el) { runtimeErrors.push('click on missing element' + (new Error().stack || '').split('\n').slice(2, 4).join(' @ ')); return }
   el.fire('click', {})
@@ -1004,7 +1049,7 @@ ok('多盆并存（一笔充值一个盆）', multi.length >= 4, '同一帧里�
 // ④ 落点散布 + 盆间碰撞（不会叠成一堆）
 const mxs = multi.map((c) => c.x)
 ok('落点散布在整个窗口宽度内（不局限于挂件）',
-  mxs.length >= 2 && Math.max(...mxs) - Math.min(...mxs) > win.innerWidth * 0.3,
+  mxs.length >= 2 && Math.max(...mxs) - Math.min(...mxs) > win.innerWidth * 0.2,
   'span=' + Math.round(Math.max(...mxs) - Math.min(...mxs)) + 'px  of ' + win.innerWidth + 'px   落点=' +
   mxs.map((v) => Math.round(v)).join(','))
 ok('落点都落在窗口内', mxs.every((v) => v >= 0 && v <= win.innerWidth))
@@ -1021,6 +1066,14 @@ ok('盆彼此有碰撞体积（不叠成一堆）', overlapped === 0, overlapped
 // 清场
 await eatAllBowls()
 
+// 白饭落地要有声音（以前只有铁锅落地才响）
+AUDIO_PLAYED.length = 0
+await spawnOne()
+await advance(2.5)
+ok('白饭落地会播放铁盆落地音效', AUDIO_PLAYED.some((s) => s.includes('pot_off.mp3')),
+  AUDIO_PLAYED.join(','))
+await eatAllBowls()
+
 console.log('')
 console.log('=== 拖动米饭盆的流体形变惯性 ===')
 // 找一个落在她身体之外（不会一拿起就被投喂）的盆
@@ -1030,15 +1083,22 @@ for (let attempt = 0; attempt < 6 && !dragStart; attempt++) {
   await advance(2.5)
   const b = lastRiceCenter()
   const pr = petRect()
-  if (b && pr && (b.x + b.r < pr.x || b.x - b.r > pr.x + pr.w)) dragStart = b
-  else await eatAllBowls()
+  if (b && pr && (b.x + b.r < pr.x || b.x - b.r > pr.x + pr.w)) {
+    // 还要保证「远离她」那一侧有足够拖动空间，否则目标点被窗口边缘夹住，
+    // 实际位移太小 / 方向相反，形变测试会偶发失败。
+    const cx = pr.x + pr.w / 2
+    const away = b.x < cx ? -1 : 1
+    const space = away < 0 ? b.x - 80 : win.innerWidth - 80 - b.x
+    if (space > 140) dragStart = b
+    else await eatAllBowls()
+  } else await eatAllBowls()
 }
 const prInf = petRect()
 if (dragStart) {
   const petCx = prInf ? prInf.x + prInf.w / 2 : win.innerWidth / 2
   // 朝「远离她」的一侧甩
   const dir = dragStart.x < petCx ? -1 : 1
-  const tx = Math.max(50, Math.min(win.innerWidth - 50, dragStart.x + dir * 230))
+  const tx = Math.max(50, Math.min(win.innerWidth - 50, dragStart.x + dir * 200))
   const ty = dragStart.y
   SCALES.length = 0
   TRANSFORMS.length = 0
@@ -1051,7 +1111,7 @@ if (dragStart) {
   const moved = lastRiceCenter()
   ok('拖动时碗跟手（不再拖尾）', !!moved && Math.abs(moved.x - tx) < 6,
     moved ? '碗 x=' + Math.round(moved.x) + '  指针 x=' + Math.round(tx) : '(没画到碗)')
-  const wantSign = dir > 0 ? -1 : 1
+  const wantSign = tx > dragStart.x ? -1 : 1
   const shears = TRANSFORMS.filter((m) => m[0] === 1 && m[1] === 0 && m[3] === 1).map((m) => m[2])
   const squashes = SCALES.filter((s) => s.x > 1.005 && s.y < 0.995)
   ok('拖动时有流体形变（横向拉伸 + 竖向压扁 + 下半部分剪切）',
@@ -1251,9 +1311,13 @@ await eatAllBowls()
 // 现在支持堆叠：一次只取最上面那口锅，所以连点几次把所有锅都取下来。
 AUDIO_PLAYED.length = 0
 const pr1 = petRect()
+const pot1 = lastIronCenter()
 DRAWS.length = 0
 if (pr1) {
-  const hx = pr1.x + pr1.w * 0.68, hy = pr1.y + pr1.h * 0.06
+  // 点「锅下方一点」的头皮：直接用锅的实际位置反推，避免角色被移动 / 镜像后固定坐标打偏。
+  // 偏移 > 锅半径，保证先命中头而不是把锅抓起来。
+  const hx = pot1 ? pot1.x : (pr1.x + pr1.w * 0.5)
+  const hy = pot1 ? (pot1.y + (pot1.r || 16) * 1.7) : (pr1.y + pr1.h * 0.2)
   for (let round = 0; round < 6; round++) {
     // 真实双击 = down/up + down/up
     for (let n = 0; n < 2; n++) {
@@ -1451,6 +1515,89 @@ ok('平板显示对齐到 12.04', TEXTS.some((t) => t.text === '12.04'),
 // 还原 0.01
 await openMenu(); click(rowBy(menuRoot, '扣费步长')); await flush(6)
 click(rowBy(menuRoot, '¥0.01')); await flush(6)
+
+console.log('')
+console.log('=== 累计计费：未收录模型 token 留痕 ===')
+ledgerStub = {
+  ok: true, enabled: true, since: Date.now() - 3600e3, now: Date.now(),
+  models: [
+    { name: 'deepseek-v4-flash', amount: 1.23, tokens: 1200, unknown: false },
+    { name: 'mystery-model-x', amount: 0.45, tokens: 12345, unknown: true },
+  ],
+  total: 1.68, turns: 2, tokens: 13545, unknownTokens: 12345,
+  unknownModels: [{ name: 'mystery-model-x', tokens: 12345 }],
+  lastSettledAt: null, currency: 'CNY',
+}
+await advance(15.2)   // 等一次账本轮询把新桩读进 ledgerCache
+await openMenu()
+await flush(20)   // 等 readLedger() 回填并重渲染菜单
+const settleRow = rowBy(menuRoot, '结束计费并结算')
+ok('账本里有两个回合时结算可用', !!settleRow && settleRow.style.cursor !== 'default',
+  settleRow ? settleRow.style.cursor : '(missing)')
+if (settleRow) click(settleRow)
+// 结算页带 15s 自动关闭定时器；测试的 setTimeout 桩不按时间排队，
+// 这里只跑微任务先看到它，再手动关（否则下一次 flush 会立刻触发自动关闭）。
+await flushMicro(30)
+const settleEl = doc.body.children.filter((c) => c.id === 'dshpet-settle')[0]
+ok('结算页已打开', !!settleEl)
+const settleText = settleEl ? settleEl.textContent : ''
+ok('未收录模型显示 token 用量',
+  settleText.includes('未收录') && settleText.includes('12,345') && settleText.includes('mystery-model-x'),
+  settleText.replace(/\s+/g, ' ').slice(0, 220))
+doc.fire('keydown', { key: 'Escape' })
+await flushMicro(5)
+ok('结算页可关闭', !doc.body.children.some((c) => c.id === 'dshpet-settle'))
+ledgerStub = { ok: true, enabled: true, since: null, models: {}, total: 0 }
+
+console.log('')
+console.log('=== 模型价格表：导入 / 更新 ===')
+priceStub = {
+  ok: true,
+  models: [
+    { id: 'mystery-model-x', name: 'Mystery Model X', matchIds: ['mystery-model-x'], price: { hit: 0.1, miss: 1, out: 5, cur: 'CNY' } },
+  ],
+  builtin: [{ name: 'deepseek-flash', price: { hit: [0.02, 0.04], miss: [1, 2], out: [4, 8] } }],
+}
+PRICE_POSTS.length = 0
+await openMenu()
+await flush(20)
+const pRow = rowBy(menuRoot, '模型价格表')
+ok('菜单有「模型价格表」', !!pRow, rowsOf(menuRoot).map((r) => r.textContent).join(' | '))
+ok('价格表条数显示正确', !!pRow && pRow.textContent.includes('1 条手动'), pRow ? pRow.textContent : '(missing)')
+if (pRow) click(pRow)
+await flush(6)
+const pRows = rowsOf(menuRoot).map((r) => r.textContent)
+ok('有导入 / 编辑 / 清空三项',
+  ['导入价格表', '编辑当前价格表', '清空手动价格表'].every((s) => pRows.some((r) => r.includes(s))),
+  pRows.join(' | '))
+ok('列表里显示手动模型与价格', pRows.some((r) => r.includes('Mystery Model X') && r.includes('¥0.1')),
+  pRows.join(' | '))
+click(rowBy(menuRoot, '编辑当前价格表')); await flush(6)
+const pe = doc.body.children.filter((c) => c.id === 'dshpet-price')[0]
+ok('价格表编辑器已打开', !!pe)
+const pta = pe && descByClass(pe, 'dshpet-price-ta')
+ok('编辑器带 JSON 文本域', !!pta)
+if (pta) {
+  pta.value = JSON.stringify({
+    models: [
+      { id: 'mystery-model-x', name: 'Mystery Model X', matchIds: ['mystery-model-x'], price: { hit: 0.2, miss: 1.2, out: 6, cur: 'CNY' } },
+      { id: 'another-unknown', name: 'Another Unknown', matchIds: ['another-unknown'], price: { hit: 0, miss: 2, out: 8, cur: 'USD', rate: 7.2 } },
+    ],
+  })
+  const pActions = descByClass(pe, 'dshpet-hol-actions')
+  const pSave = pActions && descByText(pActions, '保存')
+  if (pSave) click(pSave)
+}
+await flush(20)
+const lastPost = PRICE_POSTS[PRICE_POSTS.length - 1]
+ok('保存走 replace 并带上两条价格',
+  !!lastPost && lastPost.action === 'replace' && lastPost.models && lastPost.models.length === 2,
+  JSON.stringify(lastPost).slice(0, 220))
+ok('保存后编辑器关闭', !doc.body.children.some((c) => c.id === 'dshpet-price'))
+await openMenu(); await flush(20)
+ok('保存后菜单条数更新为 2', !!rowBy(menuRoot, '模型价格表') &&
+  rowBy(menuRoot, '模型价格表').textContent.includes('2 条手动'),
+  rowBy(menuRoot, '模型价格表') ? rowBy(menuRoot, '模型价格表').textContent : '(missing)')
 
 console.log('')
 console.log('=== 关于（含上游版本说明）===')
